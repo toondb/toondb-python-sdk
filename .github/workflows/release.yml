@@ -63,11 +63,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g., 0.3.1) - MUST match an existing toondb/toondb release tag'
+        description: 'Toondb-client release version (e.g., 0.3.1)'
         required: true
         type: string
       toondb_version:
-        description: 'ToonDB binary version (defaults to same as version if not specified)'
+        description: 'Toondb release version (e.g., 0.3.1) - MUST match an existing toondb/toondb release tag'
         required: false
         type: string
       dry_run:
