@@ -1,0 +1,313 @@
+# =============================================================================
+# ToonDB Python SDK Release Pipeline
+# =============================================================================
+#
+# Downloads pre-built binaries from main ToonDB repo releases and packages
+# them into platform-specific Python wheels for PyPI.
+#
+# Platforms supported:
+#   - Linux x86_64 (manylinux_2_17)
+#   - macOS ARM64 (Apple Silicon)
+#   - Windows x64
+#
+# =============================================================================
+# REQUIRED SETUP:
+# =============================================================================
+#
+# PyPI - NO TOKEN NEEDED!
+#   Uses OIDC Trusted Publisher (configure at PyPI project settings)
+#   https://pypi.org/manage/project/toondb-client/settings/publishing/
+#
+# =============================================================================
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., 0.3.1) - must match a toondb/toondb release'
+        required: true
+        type: string
+      dry_run:
+        description: 'Dry run (validate without publishing)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TOONDB_REPO: toondb/toondb
+
+jobs:
+  # ===========================================================================
+  # Build Python Wheels (All Platforms)
+  # ===========================================================================
+  build-wheel:
+    name: Build Wheel (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            wheel_platform: manylinux_2_17_x86_64
+            archive_ext: tar.gz
+            
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            wheel_platform: macosx_11_0_arm64
+            archive_ext: tar.gz
+            
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            wheel_platform: win_amd64
+            archive_ext: zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Create directory structure
+        shell: bash
+        run: |
+          mkdir -p src/toondb/_bin/${{ matrix.target }}
+          mkdir -p src/toondb/lib/${{ matrix.target }}
+
+      - name: Download binaries from main ToonDB release
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          TAG="v${VERSION}"
+          TARGET="${{ matrix.target }}"
+          
+          if [ "${{ matrix.archive_ext }}" = "zip" ]; then
+            ASSET_NAME="toondb-${VERSION}-${TARGET}.zip"
+          else
+            ASSET_NAME="toondb-${VERSION}-${TARGET}.tar.gz"
+          fi
+          
+          DOWNLOAD_URL="https://github.com/${{ env.TOONDB_REPO }}/releases/download/${TAG}/${ASSET_NAME}"
+          echo "Downloading from: $DOWNLOAD_URL"
+          
+          curl -L -f -o release-archive.${{ matrix.archive_ext }} "$DOWNLOAD_URL"
+          
+          # Extract the archive
+          if [ "${{ matrix.archive_ext }}" = "zip" ]; then
+            unzip -o release-archive.zip
+          else
+            tar -xzf release-archive.tar.gz
+          fi
+          
+          ls -la
+          ls -la ${TARGET}/ || true
+
+      - name: Copy binaries and libraries to SDK (Unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          TARGET="${{ matrix.target }}"
+          
+          # Copy binaries to _bin/
+          cp ${TARGET}/toondb-bulk src/toondb/_bin/${TARGET}/ 2>/dev/null || \
+            find . -maxdepth 2 -name "toondb-bulk" -type f -exec cp {} src/toondb/_bin/${TARGET}/ \;
+          
+          cp ${TARGET}/toondb-server src/toondb/_bin/${TARGET}/ 2>/dev/null || \
+            find . -maxdepth 2 -name "toondb-server" -type f -exec cp {} src/toondb/_bin/${TARGET}/ \;
+          
+          cp ${TARGET}/toondb-grpc-server src/toondb/_bin/${TARGET}/ 2>/dev/null || \
+            find . -maxdepth 2 -name "toondb-grpc-server" -type f -exec cp {} src/toondb/_bin/${TARGET}/ \;
+          
+          # Copy shared libraries to lib/
+          cp ${TARGET}/libtoondb_storage* src/toondb/lib/${TARGET}/ 2>/dev/null || \
+            find . -maxdepth 2 -name "libtoondb_storage*" -type f -exec cp {} src/toondb/lib/${TARGET}/ \;
+          
+          cp ${TARGET}/libtoondb_index* src/toondb/lib/${TARGET}/ 2>/dev/null || \
+            find . -maxdepth 2 -name "libtoondb_index*" -type f -exec cp {} src/toondb/lib/${TARGET}/ \;
+          
+          # Make executables
+          chmod +x src/toondb/_bin/${TARGET}/* 2>/dev/null || true
+          chmod +x src/toondb/lib/${TARGET}/* 2>/dev/null || true
+          
+          echo "=== Binaries ==="
+          ls -la src/toondb/_bin/${TARGET}/
+          echo "=== Libraries ==="
+          ls -la src/toondb/lib/${TARGET}/
+
+      - name: Copy binaries and libraries to SDK (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          TARGET="${{ matrix.target }}"
+          
+          # Copy binaries to _bin/ (no toondb-server on Windows)
+          cp ${TARGET}/toondb-bulk.exe src/toondb/_bin/${TARGET}/ 2>/dev/null || \
+            find . -maxdepth 2 -name "toondb-bulk.exe" -type f -exec cp {} src/toondb/_bin/${TARGET}/ \;
+          
+          cp ${TARGET}/toondb-grpc-server.exe src/toondb/_bin/${TARGET}/ 2>/dev/null || \
+            find . -maxdepth 2 -name "toondb-grpc-server.exe" -type f -exec cp {} src/toondb/_bin/${TARGET}/ \;
+          
+          # Copy shared libraries (DLLs) to lib/
+          cp ${TARGET}/toondb_storage.dll src/toondb/lib/${TARGET}/ 2>/dev/null || \
+            find . -maxdepth 2 -name "toondb_storage.dll" -type f -exec cp {} src/toondb/lib/${TARGET}/ \;
+          
+          cp ${TARGET}/toondb_index.dll src/toondb/lib/${TARGET}/ 2>/dev/null || \
+            find . -maxdepth 2 -name "toondb_index.dll" -type f -exec cp {} src/toondb/lib/${TARGET}/ \;
+          
+          echo "=== Binaries ==="
+          ls -la src/toondb/_bin/${TARGET}/
+          echo "=== Libraries ==="
+          ls -la src/toondb/lib/${TARGET}/
+
+      - name: Update package version
+        shell: bash
+        run: |
+          sed -i.bak 's/version = ".*"/version = "${{ inputs.version }}"/' pyproject.toml
+          rm -f pyproject.toml.bak
+          grep "version" pyproject.toml | head -1
+
+      - name: Build wheel
+        run: |
+          pip install build wheel
+          python -m build --wheel
+
+      - name: Rename wheel with correct platform tag
+        shell: bash
+        run: |
+          cd dist
+          for f in *-py3-none-any.whl; do
+            if [ -f "$f" ]; then
+              newname=$(echo $f | sed 's/-py3-none-any/-py3-none-${{ matrix.wheel_platform }}/')
+              mv "$f" "$newname"
+            fi
+          done
+          ls -la
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+          retention-days: 5
+
+  # ===========================================================================
+  # Build Source Distribution
+  # ===========================================================================
+  build-sdist:
+    name: Build Source Distribution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Update package version
+        run: |
+          sed -i 's/version = ".*"/version = "${{ inputs.version }}"/' pyproject.toml
+
+      - name: Build sdist
+        run: |
+          pip install build
+          python -m build --sdist
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          retention-days: 5
+
+  # ===========================================================================
+  # Publish to PyPI (DISABLED FOR TESTING)
+  # ===========================================================================
+  # publish:
+  #   name: Publish to PyPI
+  #   runs-on: ubuntu-latest
+  #   needs: [build-wheel, build-sdist]
+  #   # Required for PyPI Trusted Publisher (OIDC) - no token needed!
+  #   permissions:
+  #     id-token: write
+  #     contents: read
+  #   steps:
+  #     - name: Set up Python
+  #       uses: actions/setup-python@v5
+  #       with:
+  #         python-version: '3.12'
+
+  #     - name: Download all artifacts
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         path: dist/
+  #         merge-multiple: true
+
+  #     - name: List packages
+  #       run: |
+  #         echo "=== Packages to upload ==="
+  #         ls -la dist/
+  #         if [ -z "$(ls -A dist/)" ]; then
+  #           echo "ERROR: No Python packages found!"
+  #           exit 1
+  #         fi
+
+  #     - name: Validate packages
+  #       run: |
+  #         pip install twine
+  #         twine check dist/*
+
+  #     - name: Publish to PyPI (Trusted Publisher)
+  #       if: ${{ inputs.dry_run != true }}
+  #       uses: pypa/gh-action-pypi-publish@release/v1
+  #       with:
+  #         packages-dir: dist/
+  #         skip-existing: true
+  #         verbose: true
+
+  #     - name: Dry run validation
+  #       if: ${{ inputs.dry_run == true }}
+  #       run: |
+  #         echo "🔍 Dry run - packages validated but not uploaded"
+  #         echo "Packages:"
+  #         ls -la dist/
+
+  # ===========================================================================
+  # Release Summary
+  # ===========================================================================
+  summary:
+    name: Release Summary
+    runs-on: ubuntu-latest
+    needs: [build-wheel, build-sdist]
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "## 🐍 ToonDB Python SDK v${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Mode:** TEST BUILD (Publishing Disabled)" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Installation" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "pip install toondb-client==${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Platforms Bundled" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Linux x86_64 (manylinux_2_17)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ macOS ARM64 (Apple Silicon)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Windows x64" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Status" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Wheels | ${{ needs.build-wheel.result || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build sdist | ${{ needs.build-sdist.result || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
