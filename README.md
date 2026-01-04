@@ -1041,17 +1041,14 @@ client.close()
 
 ```bash
 # Clone repo
-git clone https://github.com/toondb/toondb
-cd toondb/toondb-python-sdk
+git clone https://github.com/toondb/toondb-python-sdk
+cd toondb-python-sdk
 
 # Install in development mode
 pip install -e .
 
 # Run tests
 pytest tests/ -v
-
-# Build native binary
-cargo build --release -p toondb-tools
 ```
 
 ## Requirements
@@ -1067,14 +1064,14 @@ Apache License 2.0
 ## Links
 
 - [Documentation](https://docs.toondb.dev/)
-- [Go SDK](../toondb-go)
-- [JavaScript SDK](../toondb-js)
-- [GitHub](https://github.com/toondb/toondb)
+- [GitHub](https://github.com/toondb/toondb-python-sdk)
 - [PyPI Package](https://pypi.org/project/toondb-client/)
+- [Changelog](https://github.com/toondb/toondb-python-sdk/blob/main/CHANGELOG.md)
+- [examples](https://github.com/toondb/toondb-python-examples)
 
 ## Support
 
-- GitHub Issues: https://github.com/toondb/toondb/issues
+- GitHub Issues: https://github.com/toondb/toondb-python-sdk/issues
 - Email: sushanth@toondb.dev
 
 ## Author

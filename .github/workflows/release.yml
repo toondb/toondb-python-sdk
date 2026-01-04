@@ -227,56 +227,56 @@ jobs:
           retention-days: 5
 
   # ===========================================================================
-  # Publish to PyPI (DISABLED FOR TESTING)
+  # Publish to PyPI
   # ===========================================================================
-  # publish:
-  #   name: Publish to PyPI
-  #   runs-on: ubuntu-latest
-  #   needs: [build-wheel, build-sdist]
-  #   # Required for PyPI Trusted Publisher (OIDC) - no token needed!
-  #   permissions:
-  #     id-token: write
-  #     contents: read
-  #   steps:
-  #     - name: Set up Python
-  #       uses: actions/setup-python@v5
-  #       with:
-  #         python-version: '3.12'
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [build-wheel, build-sdist]
+    # Required for PyPI Trusted Publisher (OIDC) - no token needed!
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-  #     - name: Download all artifacts
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         path: dist/
-  #         merge-multiple: true
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
 
-  #     - name: List packages
-  #       run: |
-  #         echo "=== Packages to upload ==="
-  #         ls -la dist/
-  #         if [ -z "$(ls -A dist/)" ]; then
-  #           echo "ERROR: No Python packages found!"
-  #           exit 1
-  #         fi
+      - name: List packages
+        run: |
+          echo "=== Packages to upload ==="
+          ls -la dist/
+          if [ -z "$(ls -A dist/)" ]; then
+            echo "ERROR: No Python packages found!"
+            exit 1
+          fi
 
-  #     - name: Validate packages
-  #       run: |
-  #         pip install twine
-  #         twine check dist/*
+      - name: Validate packages
+        run: |
+          pip install twine
+          twine check dist/*
 
-  #     - name: Publish to PyPI (Trusted Publisher)
-  #       if: ${{ inputs.dry_run != true }}
-  #       uses: pypa/gh-action-pypi-publish@release/v1
-  #       with:
-  #         packages-dir: dist/
-  #         skip-existing: true
-  #         verbose: true
+      - name: Publish to PyPI (Trusted Publisher)
+        if: ${{ inputs.dry_run != true }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+          verbose: true
 
-  #     - name: Dry run validation
-  #       if: ${{ inputs.dry_run == true }}
-  #       run: |
-  #         echo "🔍 Dry run - packages validated but not uploaded"
-  #         echo "Packages:"
-  #         ls -la dist/
+      - name: Dry run validation
+        if: ${{ inputs.dry_run == true }}
+        run: |
+          echo "🔍 Dry run - packages validated but not uploaded"
+          echo "Packages:"
+          ls -la dist/
 
   # ===========================================================================
   # Release Summary
@@ -284,14 +284,19 @@ jobs:
   summary:
     name: Release Summary
     runs-on: ubuntu-latest
-    needs: [build-wheel, build-sdist]
+    needs: [publish]
     if: always()
     steps:
       - name: Summary
         run: |
           echo "## 🐍 ToonDB Python SDK v${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Mode:** TEST BUILD (Publishing Disabled)" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "**Mode:** Dry Run (no packages published)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Mode:** Production Release" >> $GITHUB_STEP_SUMMARY
+          fi
           
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Installation" >> $GITHUB_STEP_SUMMARY
@@ -311,3 +316,4 @@ jobs:
           echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| Build Wheels | ${{ needs.build-wheel.result || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Build sdist | ${{ needs.build-sdist.result || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Publish | ${{ needs.publish.result }} |" >> $GITHUB_STEP_SUMMARY

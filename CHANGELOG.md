@@ -12,7 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved documentation accuracy across all doc files
 
 ### Changed
-- Updated to match latest Rust SDK API patterns
+## [0.3.2] - 2026-01-04
+
+### Repository Update
+- 📦 **Moved Python SDK** to its own repository: [https://github.com/toondb/toondb-python-sdk](https://github.com/toondb/toondb-python-sdk)
+- This allows for independent versioning and faster CI/CD pipelines.
+
+### Infrastructure
+- **New Release Workflow**: Now pulls pre-built binaries directly from main ToonDB releases.
+- **Trusted Publishing**: Configured PyPI Trusted Publisher (OIDC) security.
+- **Platform Bundles**: 
+  - Linux x86_64
+  - macOS ARM64 (Apple Silicon)
+  - Windows x64
 
 ## [0.2.9] - 2026-01-02
 
