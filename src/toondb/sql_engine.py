@@ -92,15 +92,20 @@ class SQLParser:
         
         Returns:
             Tuple of (operation_type, parsed_info)
-            operation_type: CREATE_TABLE, DROP_TABLE, INSERT, SELECT, UPDATE, DELETE
+            operation_type: CREATE_TABLE, DROP_TABLE, CREATE_INDEX, DROP_INDEX,
+                            INSERT, SELECT, UPDATE, DELETE
         """
         sql = sql.strip()
         upper = sql.upper()
         
         if upper.startswith("CREATE TABLE"):
             return SQLParser._parse_create_table(sql)
+        elif upper.startswith("CREATE INDEX"):
+            return SQLParser._parse_create_index(sql)
         elif upper.startswith("DROP TABLE"):
             return SQLParser._parse_drop_table(sql)
+        elif upper.startswith("DROP INDEX"):
+            return SQLParser._parse_drop_index(sql)
         elif upper.startswith("INSERT"):
             return SQLParser._parse_insert(sql)
         elif upper.startswith("SELECT"):
@@ -111,6 +116,54 @@ class SQLParser:
             return SQLParser._parse_delete(sql)
         else:
             raise ValueError(f"Unsupported SQL statement: {sql[:50]}")
+    
+    @staticmethod
+    def _parse_create_index(sql: str) -> Tuple[str, Dict]:
+        """
+        Parse CREATE INDEX statement.
+        
+        Syntax: CREATE INDEX idx_name ON table_name(column_name)
+        """
+        match = re.match(
+            r'CREATE\s+INDEX\s+(\w+)\s+ON\s+(\w+)\s*\(\s*(\w+)\s*\)',
+            sql,
+            re.IGNORECASE
+        )
+        if not match:
+            raise ValueError(f"Invalid CREATE INDEX syntax: {sql}")
+        
+        index_name = match.group(1)
+        table = match.group(2)
+        column = match.group(3)
+        
+        return "CREATE_INDEX", {
+            "index_name": index_name,
+            "table": table,
+            "column": column
+        }
+    
+    @staticmethod
+    def _parse_drop_index(sql: str) -> Tuple[str, Dict]:
+        """
+        Parse DROP INDEX statement.
+        
+        Syntax: DROP INDEX idx_name ON table_name
+        """
+        match = re.match(
+            r'DROP\s+INDEX\s+(\w+)\s+ON\s+(\w+)',
+            sql,
+            re.IGNORECASE
+        )
+        if not match:
+            raise ValueError(f"Invalid DROP INDEX syntax: {sql}")
+        
+        index_name = match.group(1)
+        table = match.group(2)
+        
+        return "DROP_INDEX", {
+            "index_name": index_name,
+            "table": table
+        }
     
     @staticmethod
     def _parse_create_table(sql: str) -> Tuple[str, Dict]:
@@ -492,10 +545,138 @@ class SQLExecutor:
     TABLE_PREFIX = b"_sql/tables/"
     SCHEMA_SUFFIX = b"/schema"
     ROWS_PREFIX = b"/rows/"
+    INDEXES_PREFIX = b"/indexes/"
+    INDEX_META_SUFFIX = b"/meta"
     
     def __init__(self, db):
         """Initialize with a Database instance."""
         self._db = db
+    
+    # =========================================================================
+    # Index Infrastructure
+    # =========================================================================
+    
+    def _index_key(self, table: str, index_name: str, value: Any, row_id: str) -> bytes:
+        """Get key for an index entry: _sql/tables/{table}/indexes/{idx}/{value}/{row_id}."""
+        # Encode value as sortable string for range queries
+        value_str = self._encode_index_value(value)
+        return (
+            self.TABLE_PREFIX + table.encode() + 
+            self.INDEXES_PREFIX + index_name.encode() + 
+            b"/" + value_str.encode() + b"/" + row_id.encode()
+        )
+    
+    def _index_prefix(self, table: str, index_name: str) -> bytes:
+        """Get prefix for all entries in an index."""
+        return (
+            self.TABLE_PREFIX + table.encode() + 
+            self.INDEXES_PREFIX + index_name.encode() + b"/"
+        )
+    
+    def _index_value_prefix(self, table: str, index_name: str, value: Any) -> bytes:
+        """Get prefix for all entries with a specific value in an index."""
+        value_str = self._encode_index_value(value)
+        return (
+            self.TABLE_PREFIX + table.encode() + 
+            self.INDEXES_PREFIX + index_name.encode() + 
+            b"/" + value_str.encode() + b"/"
+        )
+    
+    def _encode_index_value(self, value: Any) -> str:
+        """Encode a value for use in index keys (sortable string format)."""
+        if value is None:
+            return "__null__"
+        elif isinstance(value, bool):
+            return f"b:{1 if value else 0}"
+        elif isinstance(value, int):
+            # Zero-pad integers for proper string sorting
+            return f"i:{value:020d}"
+        elif isinstance(value, float):
+            return f"f:{value:030.15f}"
+        else:
+            # String values - escape slashes
+            return f"s:{str(value).replace('/', '__SLASH__')}"
+    
+    def _index_meta_key(self, table: str, index_name: str) -> bytes:
+        """Get key for index metadata."""
+        return (
+            self.TABLE_PREFIX + table.encode() + 
+            self.INDEXES_PREFIX + index_name.encode() + 
+            self.INDEX_META_SUFFIX
+        )
+    
+    def _get_indexes(self, table: str) -> Dict[str, str]:
+        """Get all indexes for a table. Returns {index_name: column_name}."""
+        prefix = self.TABLE_PREFIX + table.encode() + self.INDEXES_PREFIX
+        indexes = {}
+        
+        for key, value in self._db.scan_prefix(prefix):
+            if key.endswith(self.INDEX_META_SUFFIX):
+                # Extract index name from key
+                parts = key.decode().split("/")
+                if len(parts) >= 5:  # _sql/tables/{table}/indexes/{idx}/meta
+                    idx_name = parts[4]
+                    meta = json.loads(value.decode())
+                    indexes[idx_name] = meta.get("column", idx_name)
+        
+        return indexes
+    
+    def _update_index(self, table: str, index_name: str, column: str, 
+                      old_row: Optional[Dict], new_row: Optional[Dict], row_id: str):
+        """Update index entries when a row changes."""
+        old_value = old_row.get(column) if old_row else None
+        new_value = new_row.get(column) if new_row else None
+        
+        # Remove old index entry if value changed
+        if old_row and (new_row is None or old_value != new_value):
+            old_key = self._index_key(table, index_name, old_value, row_id)
+            self._db.delete(old_key)
+        
+        # Add new index entry if there's a new row
+        if new_row and (old_row is None or old_value != new_value):
+            new_key = self._index_key(table, index_name, new_value, row_id)
+            self._db.put(new_key, row_id.encode())
+    
+    def _lookup_by_index(self, table: str, column: str, value: Any) -> List[str]:
+        """Look up row IDs by index value. Returns list of row_ids."""
+        indexes = self._get_indexes(table)
+        
+        # Find index for this column
+        index_name = None
+        for idx_name, col in indexes.items():
+            if col == column:
+                index_name = idx_name
+                break
+        
+        if index_name is None:
+            return []  # No index available
+        
+        # Scan index entries for this value
+        prefix = self._index_value_prefix(table, index_name, value)
+        row_ids = []
+        
+        for key, value_bytes in self._db.scan_prefix(prefix):
+            row_ids.append(value_bytes.decode())
+        
+        return row_ids
+    
+    def _has_index_for_column(self, table: str, column: str) -> bool:
+        """Check if an index exists for a column."""
+        indexes = self._get_indexes(table)
+        return any(col == column for col in indexes.values())
+    
+    def _find_indexed_equality_condition(self, table: str, 
+                                          conditions: List[Tuple]) -> Optional[Tuple[str, Any]]:
+        """
+        Find a WHERE condition that can use an index.
+        Returns (column, value) if found, None otherwise.
+        Only considers equality conditions (=).
+        """
+        for condition in conditions:
+            col, op, val = condition
+            if op == "=" and self._has_index_for_column(table, col):
+                return (col, val)
+        return None
     
     def execute(self, sql: str) -> SQLQueryResult:
         """Execute a SQL statement."""
@@ -505,6 +686,10 @@ class SQLExecutor:
             return self._create_table(data)
         elif operation == "DROP_TABLE":
             return self._drop_table(data)
+        elif operation == "CREATE_INDEX":
+            return self._create_index(data)
+        elif operation == "DROP_INDEX":
+            return self._drop_index(data)
         elif operation == "INSERT":
             return self._insert(data)
         elif operation == "SELECT":
@@ -559,7 +744,15 @@ class SQLExecutor:
         """Drop a table."""
         table = data["table"]
         
-        # Delete all rows first
+        # Delete all indexes first
+        indexes = self._get_indexes(table)
+        for idx_name in indexes:
+            idx_prefix = self._index_prefix(table, idx_name)
+            for key, _ in self._db.scan_prefix(idx_prefix):
+                self._db.delete(key)
+            self._db.delete(self._index_meta_key(table, idx_name))
+        
+        # Delete all rows
         prefix = self._row_prefix(table)
         rows_deleted = 0
         for key, _ in self._db.scan_prefix(prefix):
@@ -571,8 +764,77 @@ class SQLExecutor:
         
         return SQLQueryResult(rows=[], columns=[], rows_affected=rows_deleted)
     
+    def _create_index(self, data: Dict) -> SQLQueryResult:
+        """
+        Create a secondary index on a column.
+        
+        CREATE INDEX idx_name ON table(column)
+        
+        This builds the index by scanning existing rows.
+        """
+        index_name = data["index_name"]
+        table = data["table"]
+        column = data["column"]
+        
+        schema = self._get_schema(table)
+        if schema is None:
+            raise ValueError(f"Table '{table}' does not exist")
+        
+        # Check column exists
+        if not any(c.name == column for c in schema.columns):
+            raise ValueError(f"Column '{column}' does not exist in table '{table}'")
+        
+        # Check index doesn't already exist
+        if self._db.get(self._index_meta_key(table, index_name)) is not None:
+            raise ValueError(f"Index '{index_name}' already exists on table '{table}'")
+        
+        # Store index metadata
+        meta = {"column": column, "table": table}
+        self._db.put(
+            self._index_meta_key(table, index_name),
+            json.dumps(meta).encode()
+        )
+        
+        # Build index from existing rows
+        prefix = self._row_prefix(table)
+        indexed_count = 0
+        
+        for _, value in self._db.scan_prefix(prefix):
+            row = json.loads(value.decode())
+            row_id = row.get("_id", "")
+            col_value = row.get(column)
+            
+            # Add index entry
+            idx_key = self._index_key(table, index_name, col_value, row_id)
+            self._db.put(idx_key, row_id.encode())
+            indexed_count += 1
+        
+        return SQLQueryResult(rows=[], columns=[], rows_affected=indexed_count)
+    
+    def _drop_index(self, data: Dict) -> SQLQueryResult:
+        """Drop a secondary index."""
+        index_name = data["index_name"]
+        table = data.get("table")
+        
+        # If table not specified, find it from index meta
+        if table is None:
+            # Search for index in all tables - not ideal but works
+            raise ValueError("DROP INDEX requires table name: DROP INDEX idx_name ON table")
+        
+        # Delete all index entries
+        idx_prefix = self._index_prefix(table, index_name)
+        deleted = 0
+        for key, _ in self._db.scan_prefix(idx_prefix):
+            self._db.delete(key)
+            deleted += 1
+        
+        # Delete index metadata
+        self._db.delete(self._index_meta_key(table, index_name))
+        
+        return SQLQueryResult(rows=[], columns=[], rows_affected=deleted)
+    
     def _insert(self, data: Dict) -> SQLQueryResult:
-        """Insert a row."""
+        """Insert a row and maintain secondary indexes."""
         table = data["table"]
         columns = data["columns"]
         values = data["values"]
@@ -605,6 +867,11 @@ class SQLExecutor:
             self._row_key(table, row_id),
             json.dumps(row).encode()
         )
+        
+        # Update secondary indexes
+        indexes = self._get_indexes(table)
+        for idx_name, idx_col in indexes.items():
+            self._update_index(table, idx_name, idx_col, None, row, row_id)
         
         return SQLQueryResult(rows=[], columns=[], rows_affected=1)
     
@@ -692,7 +959,12 @@ class SQLExecutor:
         return True
     
     def _update(self, data: Dict) -> SQLQueryResult:
-        """Update rows."""
+        """
+        Update rows. Uses index lookup when WHERE clause has indexed equality condition.
+        
+        Index-accelerated path: O(k) where k = matching rows
+        Fallback path: O(n) full table scan
+        """
         table = data["table"]
         updates = data["updates"]
         conditions = data.get("where", [])
@@ -701,27 +973,76 @@ class SQLExecutor:
         if schema is None:
             raise ValueError(f"Table '{table}' does not exist")
         
-        # Scan all rows
-        prefix = self._row_prefix(table)
+        indexes = self._get_indexes(table)
         rows_affected = 0
         
-        for key, value in self._db.scan_prefix(prefix):
-            row = json.loads(value.decode())
+        # Try index-accelerated path
+        indexed_cond = self._find_indexed_equality_condition(table, conditions)
+        
+        if indexed_cond:
+            # Index-accelerated UPDATE: lookup matching row IDs directly
+            col, val = indexed_cond
+            row_ids = self._lookup_by_index(table, col, val)
             
-            # Apply WHERE conditions
-            if self._matches_conditions(row, conditions):
+            for row_id in row_ids:
+                key = self._row_key(table, row_id)
+                value = self._db.get(key)
+                if value is None:
+                    continue
+                
+                old_row = json.loads(value.decode())
+                
+                # Apply all WHERE conditions (not just the indexed one)
+                if not self._matches_conditions(old_row, conditions):
+                    continue
+                
                 # Apply updates
-                for col, val in updates.items():
-                    row[col] = val
+                new_row = old_row.copy()
+                for ucol, uval in updates.items():
+                    new_row[ucol] = uval
+                
+                # Update indexes for changed columns
+                for idx_name, idx_col in indexes.items():
+                    if idx_col in updates:
+                        self._update_index(table, idx_name, idx_col, old_row, new_row, row_id)
                 
                 # Save updated row
-                self._db.put(key, json.dumps(row).encode())
+                self._db.put(key, json.dumps(new_row).encode())
                 rows_affected += 1
+        else:
+            # Fallback: full table scan
+            prefix = self._row_prefix(table)
+            
+            for key, value in self._db.scan_prefix(prefix):
+                old_row = json.loads(value.decode())
+                
+                # Apply WHERE conditions
+                if self._matches_conditions(old_row, conditions):
+                    # Apply updates
+                    new_row = old_row.copy()
+                    for ucol, uval in updates.items():
+                        new_row[ucol] = uval
+                    
+                    row_id = old_row.get("_id", "")
+                    
+                    # Update indexes for changed columns
+                    for idx_name, idx_col in indexes.items():
+                        if idx_col in updates:
+                            self._update_index(table, idx_name, idx_col, old_row, new_row, row_id)
+                    
+                    # Save updated row
+                    self._db.put(key, json.dumps(new_row).encode())
+                    rows_affected += 1
         
         return SQLQueryResult(rows=[], columns=[], rows_affected=rows_affected)
     
     def _delete(self, data: Dict) -> SQLQueryResult:
-        """Delete rows."""
+        """
+        Delete rows. Uses index lookup when WHERE clause has indexed equality condition.
+        
+        Index-accelerated path: O(k) where k = matching rows
+        Fallback path: O(n) full table scan
+        """
         table = data["table"]
         conditions = data.get("where", [])
         
@@ -729,22 +1050,60 @@ class SQLExecutor:
         if schema is None:
             raise ValueError(f"Table '{table}' does not exist")
         
-        # Scan all rows
-        prefix = self._row_prefix(table)
+        indexes = self._get_indexes(table)
         rows_affected = 0
-        keys_to_delete = []
         
-        # Collect keys to delete (don't modify while iterating)
-        for key, value in self._db.scan_prefix(prefix):
-            row = json.loads(value.decode())
+        # Try index-accelerated path
+        indexed_cond = self._find_indexed_equality_condition(table, conditions)
+        
+        if indexed_cond:
+            # Index-accelerated DELETE: lookup matching row IDs directly
+            col, val = indexed_cond
+            row_ids = self._lookup_by_index(table, col, val)
             
-            # Apply WHERE conditions
-            if self._matches_conditions(row, conditions):
-                keys_to_delete.append(key)
-        
-        # Delete collected keys
-        for key in keys_to_delete:
-            self._db.delete(key)
-            rows_affected += 1
+            rows_to_delete = []  # (key, row) pairs
+            
+            for row_id in row_ids:
+                key = self._row_key(table, row_id)
+                value = self._db.get(key)
+                if value is None:
+                    continue
+                
+                row = json.loads(value.decode())
+                
+                # Apply all WHERE conditions (not just the indexed one)
+                if self._matches_conditions(row, conditions):
+                    rows_to_delete.append((key, row, row_id))
+            
+            # Delete rows and update indexes
+            for key, row, row_id in rows_to_delete:
+                # Remove from all indexes
+                for idx_name, idx_col in indexes.items():
+                    self._update_index(table, idx_name, idx_col, row, None, row_id)
+                
+                self._db.delete(key)
+                rows_affected += 1
+        else:
+            # Fallback: full table scan
+            prefix = self._row_prefix(table)
+            rows_to_delete = []
+            
+            # Collect keys to delete (don't modify while iterating)
+            for key, value in self._db.scan_prefix(prefix):
+                row = json.loads(value.decode())
+                
+                # Apply WHERE conditions
+                if self._matches_conditions(row, conditions):
+                    row_id = row.get("_id", "")
+                    rows_to_delete.append((key, row, row_id))
+            
+            # Delete collected rows and update indexes
+            for key, row, row_id in rows_to_delete:
+                # Remove from all indexes
+                for idx_name, idx_col in indexes.items():
+                    self._update_index(table, idx_name, idx_col, row, None, row_id)
+                
+                self._db.delete(key)
+                rows_affected += 1
         
         return SQLQueryResult(rows=[], columns=[], rows_affected=rows_affected)

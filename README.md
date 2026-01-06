@@ -45,6 +45,115 @@ pip install toondb-client
 
 ## What's New in Latest Release
 
+### 🛡️ Policy & Safety Hooks
+Enforce safety policies on agent operations with pre/post triggers:
+
+```python
+from toondb import Database, PolicyEngine, PolicyAction
+
+db = Database.open("./agent_data")
+policy = PolicyEngine(db)
+
+# Block writes to system keys from agents
+@policy.before_write("system/*")
+def block_system_writes(key, value, context):
+    if context.get("agent_id"):
+        return PolicyAction.DENY
+    return PolicyAction.ALLOW
+
+# Redact sensitive data on read
+@policy.after_read("users/*/email")
+def redact_emails(key, value, context):
+    if context.get("redact_pii"):
+        return b"[REDACTED]"
+    return value
+
+# Rate limit writes per agent
+policy.add_rate_limit("write", max_per_minute=100, scope="agent_id")
+
+# Enable audit logging
+policy.enable_audit()
+
+# Use policy-wrapped operations
+policy.put(b"users/alice", b"data", context={"agent_id": "agent_001"})
+```
+
+### 🔀 Multi-Agent Tool Routing
+Route tool calls to specialized agents with automatic failover:
+
+```python
+from toondb import Database, ToolDispatcher, ToolCategory, RoutingStrategy
+
+db = Database.open("./agent_data")
+dispatcher = ToolDispatcher(db)
+
+# Register agents with capabilities
+dispatcher.register_local_agent(
+    "code_agent",
+    capabilities=[ToolCategory.CODE, ToolCategory.GIT],
+    handler=lambda tool, args: {"result": f"Processed {tool}"},
+)
+
+dispatcher.register_remote_agent(
+    "search_agent",
+    capabilities=[ToolCategory.SEARCH],
+    endpoint="http://localhost:8001/invoke",
+)
+
+# Register tools
+dispatcher.register_tool(
+    name="search_code",
+    description="Search codebase",
+    category=ToolCategory.CODE,
+)
+
+# Invoke with automatic routing (priority, round-robin, fastest, etc.)
+result = dispatcher.invoke("search_code", {"query": "auth"}, session_id="sess_001")
+print(f"Routed to: {result.agent_id}, Success: {result.success}")
+```
+
+### 🕸️ Graph Overlay
+Lightweight graph layer for agent memory relationships:
+
+```python
+from toondb import Database, GraphOverlay, TraversalOrder
+
+db = Database.open("./agent_data")
+graph = GraphOverlay(db)
+
+# Add nodes (entities, concepts, events)
+graph.add_node("user:alice", node_type="user", properties={"role": "admin"})
+graph.add_node("project:toondb", node_type="project", properties={"status": "active"})
+
+# Add relationships
+graph.add_edge("user:alice", "project:toondb", edge_type="owns", properties={"since": "2024"})
+
+# Traverse graph (BFS/DFS)
+related = graph.bfs("user:alice", max_depth=2, edge_filter=lambda e: e.edge_type == "owns")
+
+# Find shortest path
+path = graph.shortest_path("user:alice", "project:toondb")
+```
+
+### 🔗 Unified Connection API
+Single entry point with auto-detection:
+
+```python
+import toondb
+
+# Auto-detects embedded mode from path
+db = toondb.connect("./my_database")
+
+# Auto-detects IPC mode from socket
+db = toondb.connect("/tmp/toondb.sock")
+
+# Auto-detects gRPC mode from host:port
+db = toondb.connect("localhost:50051")
+
+# Explicit mode
+db = toondb.connect("./data", mode="embedded", config={"sync_mode": "full"})
+```
+
 ### 🎯 Namespace Isolation
 Logical database namespaces for true multi-tenancy without key prefixing:
 

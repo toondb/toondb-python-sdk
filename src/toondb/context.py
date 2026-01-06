@@ -699,3 +699,476 @@ def split_by_tokens(
         chunks.append(" ".join(current_chunk))
     
     return chunks
+
+
+# ============================================================================
+# CONTEXT SELECT: Production-Ready Query Builder (Aligned with Rust Model)
+# ============================================================================
+
+class SectionKind(str, Enum):
+    """Section content kind - aligned with Rust SectionContent enum."""
+    GET = "get"              # GET path expression
+    LAST = "last"            # LAST N FROM table
+    SEARCH = "search"        # SEARCH by similarity
+    SELECT = "select"        # Standard SQL subquery
+    LITERAL = "literal"      # Literal value
+    VARIABLE = "variable"    # Variable reference
+    TOOL_REGISTRY = "tool_registry"  # Available tools
+    TOOL_CALLS = "tool_calls"        # Recent tool calls
+
+
+class TruncationPolicy(str, Enum):
+    """Truncation policy when budget is exceeded."""
+    TAIL_DROP = "tail_drop"       # Drop from tail (keep head)
+    HEAD_DROP = "head_drop"       # Drop from head (keep tail)
+    PROPORTIONAL = "proportional" # Proportional truncation
+    FAIL = "fail"                 # Fail on budget exceeded
+
+
+@dataclass
+class ContextSectionConfig:
+    """
+    Configuration for a single context section.
+    
+    Aligned with Rust ContextSection model for production consistency.
+    
+    Example:
+        # Get user profile
+        ContextSectionConfig(
+            name="user",
+            kind=SectionKind.GET,
+            priority=0,
+            path="users/alice/profile",
+            fields=["name", "preferences"]
+        )
+        
+        # Last 10 tool calls
+        ContextSectionConfig(
+            name="history",
+            kind=SectionKind.LAST,
+            priority=1,
+            table="tool_calls",
+            count=10,
+            where={"status": "success"}
+        )
+        
+        # Vector search
+        ContextSectionConfig(
+            name="knowledge",
+            kind=SectionKind.SEARCH,
+            priority=2,
+            collection="docs",
+            query="machine learning",
+            top_k=5
+        )
+    """
+    name: str
+    kind: SectionKind
+    priority: int = 0  # Lower = higher priority
+    
+    # GET options
+    path: Optional[str] = None
+    fields: Optional[List[str]] = None
+    
+    # LAST/SELECT options
+    table: Optional[str] = None
+    count: Optional[int] = None
+    columns: Optional[List[str]] = None
+    where: Optional[Dict[str, Any]] = None
+    limit: Optional[int] = None
+    
+    # SEARCH options
+    collection: Optional[str] = None
+    query: Optional[str] = None
+    vector: Optional[List[float]] = None
+    top_k: int = 5
+    min_score: Optional[float] = None
+    
+    # LITERAL options
+    text: Optional[str] = None
+    
+    # VARIABLE options
+    variable_name: Optional[str] = None
+    
+    # TOOL_REGISTRY options
+    include_tools: Optional[List[str]] = None
+    exclude_tools: Optional[List[str]] = None
+    include_schema: bool = True
+    
+    # TOOL_CALLS options
+    tool_filter: Optional[str] = None
+    status_filter: Optional[str] = None
+    include_outputs: bool = True
+
+
+@dataclass
+class ContextSelectResult:
+    """Result from CONTEXT SELECT execution."""
+    sections: List[Dict[str, Any]]
+    total_tokens: int
+    budget_tokens: int
+    truncated: bool = False
+    truncated_sections: List[str] = field(default_factory=list)
+    provenance: Dict[str, Any] = field(default_factory=dict)
+    
+    def as_text(self, include_headers: bool = True) -> str:
+        """Format as text for LLM prompt."""
+        parts = []
+        for section in self.sections:
+            if include_headers:
+                parts.append(f"## {section['name']}")
+            if "content" in section:
+                content = section["content"]
+                if isinstance(content, list):
+                    parts.append("\n".join(str(item) for item in content))
+                elif isinstance(content, dict):
+                    parts.append(json.dumps(content, indent=2))
+                else:
+                    parts.append(str(content))
+        return "\n\n".join(parts)
+    
+    def as_json(self) -> str:
+        """Format as JSON."""
+        return json.dumps({
+            "sections": self.sections,
+            "total_tokens": self.total_tokens,
+            "budget_tokens": self.budget_tokens,
+            "truncated": self.truncated,
+            "provenance": self.provenance,
+        }, indent=2)
+
+
+class ContextSelect:
+    """
+    Production-ready CONTEXT SELECT query builder.
+    
+    Aligned with Rust ContextSelectQuery for consistent semantics across
+    embedded, IPC, and MCP deployment modes.
+    
+    Example:
+        from toondb import Database
+        from toondb.context import ContextSelect, SectionKind, ContextSectionConfig
+        
+        db = Database.open("./my_db")
+        
+        result = (
+            ContextSelect(db)
+            .add_section(ContextSectionConfig(
+                name="user",
+                kind=SectionKind.GET,
+                priority=0,
+                path="users/alice/profile"
+            ))
+            .add_section(ContextSectionConfig(
+                name="history",
+                kind=SectionKind.LAST,
+                priority=1,
+                table="events",
+                count=10
+            ))
+            .add_section(ContextSectionConfig(
+                name="knowledge",
+                kind=SectionKind.SEARCH,
+                priority=2,
+                collection="docs",
+                query="machine learning",
+                top_k=5
+            ))
+            .with_token_budget(4096)
+            .execute()
+        )
+        
+        prompt = f'''Context:
+        {result.as_text()}
+        
+        Question: What is machine learning?
+        '''
+    """
+    
+    def __init__(
+        self,
+        db: "Database",
+        token_estimator: Optional[TokenEstimator] = None,
+    ):
+        """
+        Initialize CONTEXT SELECT builder.
+        
+        Args:
+            db: ToonDB Database instance
+            token_estimator: Optional token estimator (default: heuristic)
+        """
+        from .database import Database
+        if not isinstance(db, Database):
+            raise TypeError("db must be a Database instance")
+        
+        self._db = db
+        self._estimator = token_estimator or TokenEstimator()
+        self._sections: List[ContextSectionConfig] = []
+        self._token_budget: int = 4096
+        self._truncation: TruncationPolicy = TruncationPolicy.TAIL_DROP
+        self._include_headers: bool = True
+        self._output_format: str = "text"
+        
+    def add_section(self, section: ContextSectionConfig) -> "ContextSelect":
+        """Add a section to the context query."""
+        self._sections.append(section)
+        return self
+    
+    def with_token_budget(self, tokens: int) -> "ContextSelect":
+        """Set token budget for entire context."""
+        self._token_budget = tokens
+        return self
+    
+    def with_truncation(self, policy: TruncationPolicy) -> "ContextSelect":
+        """Set truncation policy when budget is exceeded."""
+        self._truncation = policy
+        return self
+    
+    def with_headers(self, include: bool = True) -> "ContextSelect":
+        """Include section headers in output."""
+        self._include_headers = include
+        return self
+    
+    def execute(self) -> ContextSelectResult:
+        """
+        Execute the CONTEXT SELECT query.
+        
+        Sections are processed in priority order (lower = higher priority).
+        Token budget is enforced using greedy allocation.
+        
+        Returns:
+            ContextSelectResult with assembled context
+        """
+        if not self._sections:
+            raise ValueError("No sections added. Use add_section().")
+        
+        # Sort by priority
+        sorted_sections = sorted(self._sections, key=lambda s: s.priority)
+        
+        assembled_sections = []
+        total_tokens = 0
+        truncated = False
+        truncated_sections = []
+        provenance = {}
+        
+        for section in sorted_sections:
+            # Execute section
+            section_data = self._execute_section(section)
+            
+            # Estimate tokens
+            section_text = json.dumps(section_data) if isinstance(section_data, (dict, list)) else str(section_data)
+            section_tokens = self._estimator.count(section_text)
+            
+            # Check budget
+            if total_tokens + section_tokens > self._token_budget:
+                if self._truncation == TruncationPolicy.FAIL:
+                    raise ValueError(f"Token budget exceeded at section '{section.name}'")
+                elif self._truncation == TruncationPolicy.TAIL_DROP:
+                    # Try to fit partial content
+                    remaining = self._token_budget - total_tokens
+                    if remaining > 50:  # Minimum useful content
+                        section_data = self._truncate_section(section_data, remaining)
+                        section_tokens = remaining
+                        truncated = True
+                        truncated_sections.append(section.name)
+                    else:
+                        truncated_sections.append(section.name)
+                        continue
+                else:
+                    truncated_sections.append(section.name)
+                    continue
+            
+            assembled_sections.append({
+                "name": section.name,
+                "priority": section.priority,
+                "kind": section.kind.value,
+                "content": section_data,
+                "tokens": section_tokens,
+            })
+            total_tokens += section_tokens
+            
+            # Track provenance
+            provenance[section.name] = {
+                "kind": section.kind.value,
+                "tokens": section_tokens,
+                "source": self._get_provenance_source(section),
+            }
+        
+        return ContextSelectResult(
+            sections=assembled_sections,
+            total_tokens=total_tokens,
+            budget_tokens=self._token_budget,
+            truncated=truncated,
+            truncated_sections=truncated_sections,
+            provenance=provenance,
+        )
+    
+    def _execute_section(self, section: ContextSectionConfig) -> Any:
+        """Execute a single section and return its content."""
+        if section.kind == SectionKind.GET:
+            return self._exec_get(section)
+        elif section.kind == SectionKind.LAST:
+            return self._exec_last(section)
+        elif section.kind == SectionKind.SELECT:
+            return self._exec_select(section)
+        elif section.kind == SectionKind.SEARCH:
+            return self._exec_search(section)
+        elif section.kind == SectionKind.LITERAL:
+            return section.text or ""
+        elif section.kind == SectionKind.VARIABLE:
+            return f"${{{section.variable_name}}}"  # Placeholder for variable expansion
+        elif section.kind == SectionKind.TOOL_REGISTRY:
+            return self._exec_tool_registry(section)
+        elif section.kind == SectionKind.TOOL_CALLS:
+            return self._exec_tool_calls(section)
+        else:
+            return None
+    
+    def _exec_get(self, section: ContextSectionConfig) -> Any:
+        """Execute GET section."""
+        if not section.path:
+            return None
+        
+        data = self._db.get_path(section.path)
+        if data is None:
+            return None
+        
+        try:
+            parsed = json.loads(data.decode("utf-8"))
+            # Project fields if specified
+            if section.fields and isinstance(parsed, dict):
+                return {k: parsed.get(k) for k in section.fields if k in parsed}
+            return parsed
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return data.decode("utf-8", errors="replace")
+    
+    def _exec_last(self, section: ContextSectionConfig) -> List[Any]:
+        """Execute LAST section."""
+        if not section.table:
+            return []
+        
+        prefix = f"_sql/tables/{section.table}/rows/".encode()
+        results = []
+        count = section.count or 10
+        
+        for key, value in self._db.scan_prefix(prefix):
+            try:
+                row = json.loads(value.decode("utf-8"))
+                # Apply WHERE filter
+                if section.where:
+                    if not self._matches_where(row, section.where):
+                        continue
+                results.append(row)
+                if len(results) >= count:
+                    break
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+        
+        return results
+    
+    def _exec_select(self, section: ContextSectionConfig) -> List[Any]:
+        """Execute SELECT section."""
+        # Use SQL engine if available
+        if section.table:
+            columns = ",".join(section.columns or ["*"])
+            sql = f"SELECT {columns} FROM {section.table}"
+            if section.where:
+                conditions = " AND ".join(f"{k}='{v}'" for k, v in section.where.items())
+                sql += f" WHERE {conditions}"
+            if section.limit:
+                sql += f" LIMIT {section.limit}"
+            
+            try:
+                result = self._db.execute(sql)
+                return result.rows
+            except Exception:
+                return []
+        return []
+    
+    def _exec_search(self, section: ContextSectionConfig) -> List[Any]:
+        """Execute SEARCH section."""
+        # Vector search via namespace/collection
+        # This is a placeholder - real implementation would use vector index
+        if section.collection:
+            # Try to get collection from namespace
+            try:
+                ns = self._db.namespace("default")
+                coll = ns.collection(section.collection)
+                from .namespace import SearchRequest
+                
+                request = SearchRequest(
+                    text_query=section.query,
+                    k=section.top_k,
+                )
+                results = coll.search(request)
+                return [{"id": r.id, "score": r.score, "metadata": r.metadata} for r in results]
+            except Exception:
+                pass
+        return []
+    
+    def _exec_tool_registry(self, section: ContextSectionConfig) -> List[Dict[str, Any]]:
+        """Execute TOOL_REGISTRY section."""
+        # Placeholder - would query actual tool registry
+        return [{"name": "example_tool", "description": "Example tool"}]
+    
+    def _exec_tool_calls(self, section: ContextSectionConfig) -> List[Any]:
+        """Execute TOOL_CALLS section."""
+        prefix = b"_tool_calls/"
+        results = []
+        count = section.count or 10
+        
+        for key, value in self._db.scan_prefix(prefix):
+            try:
+                call = json.loads(value.decode("utf-8"))
+                if section.tool_filter and call.get("tool") != section.tool_filter:
+                    continue
+                if section.status_filter and call.get("status") != section.status_filter:
+                    continue
+                if not section.include_outputs:
+                    call.pop("output", None)
+                results.append(call)
+                if len(results) >= count:
+                    break
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+        
+        return results
+    
+    def _matches_where(self, row: Dict[str, Any], where: Dict[str, Any]) -> bool:
+        """Check if row matches WHERE conditions."""
+        for key, value in where.items():
+            if row.get(key) != value:
+                return False
+        return True
+    
+    def _truncate_section(self, data: Any, max_tokens: int) -> Any:
+        """Truncate section content to fit token budget."""
+        if isinstance(data, str):
+            # Truncate string
+            chars = max_tokens * 4  # Heuristic
+            return data[:chars] + "..." if len(data) > chars else data
+        elif isinstance(data, list):
+            # Truncate list
+            truncated = []
+            tokens = 0
+            for item in data:
+                item_str = json.dumps(item) if isinstance(item, dict) else str(item)
+                item_tokens = self._estimator.count(item_str)
+                if tokens + item_tokens > max_tokens:
+                    break
+                truncated.append(item)
+                tokens += item_tokens
+            return truncated
+        return data
+    
+    def _get_provenance_source(self, section: ContextSectionConfig) -> str:
+        """Get provenance source string for a section."""
+        if section.kind == SectionKind.GET:
+            return f"path:{section.path}"
+        elif section.kind == SectionKind.LAST:
+            return f"table:{section.table}"
+        elif section.kind == SectionKind.SEARCH:
+            return f"collection:{section.collection}"
+        elif section.kind == SectionKind.SELECT:
+            return f"sql:{section.table}"
+        return section.kind.value

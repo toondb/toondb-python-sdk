@@ -23,7 +23,7 @@ import os
 import sys
 import ctypes
 import warnings
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Union
 from contextlib import contextmanager
 from .errors import (
     DatabaseError, 
@@ -130,6 +130,33 @@ class C_TxnHandle(ctypes.Structure):
     ]
 
 
+class C_CommitResult(ctypes.Structure):
+    """Commit result with HLC-backed monotonic timestamp."""
+    _fields_ = [
+        ("commit_ts", ctypes.c_uint64),  # HLC timestamp, 0 on error
+        ("error_code", ctypes.c_int32),  # 0=success, -1=error, -2=SSI conflict
+    ]
+
+
+class C_DatabaseConfig(ctypes.Structure):
+    """Database configuration passed to toondb_open_with_config.
+    
+    Configuration options control durability, performance, and indexing behavior.
+    Fields with _set suffix indicate whether the corresponding value was explicitly set.
+    """
+    _fields_ = [
+        ("wal_enabled", ctypes.c_bool),          # Enable WAL for durability
+        ("wal_enabled_set", ctypes.c_bool),      # Whether wal_enabled was set
+        ("sync_mode", ctypes.c_uint8),           # 0=OFF, 1=NORMAL, 2=FULL
+        ("sync_mode_set", ctypes.c_bool),        # Whether sync_mode was set
+        ("memtable_size_bytes", ctypes.c_uint64), # Memtable size (0=default 64MB)
+        ("group_commit", ctypes.c_bool),         # Enable group commit
+        ("group_commit_set", ctypes.c_bool),     # Whether group_commit was set
+        ("default_index_policy", ctypes.c_uint8), # 0=WriteOptimized, 1=Balanced, 2=ScanOptimized, 3=AppendOnly
+        ("default_index_policy_set", ctypes.c_bool), # Whether index policy was set
+    ]
+
+
 class C_StorageStats(ctypes.Structure):
     _fields_ = [
         ("memtable_size_bytes", ctypes.c_uint64),
@@ -163,6 +190,10 @@ class _FFI:
         lib.toondb_open.argtypes = [ctypes.c_char_p]
         lib.toondb_open.restype = ctypes.c_void_p
         
+        # toondb_open_with_config(path: *const c_char, config: C_DatabaseConfig) -> *mut DatabasePtr
+        lib.toondb_open_with_config.argtypes = [ctypes.c_char_p, C_DatabaseConfig]
+        lib.toondb_open_with_config.restype = ctypes.c_void_p
+        
         # toondb_close(ptr: *mut DatabasePtr)
         lib.toondb_close.argtypes = [ctypes.c_void_p]
         lib.toondb_close.restype = None
@@ -172,9 +203,10 @@ class _FFI:
         lib.toondb_begin_txn.argtypes = [ctypes.c_void_p]
         lib.toondb_begin_txn.restype = C_TxnHandle
         
-        # toondb_commit(ptr: *mut DatabasePtr, handle: C_TxnHandle) -> c_int
+        # toondb_commit(ptr: *mut DatabasePtr, handle: C_TxnHandle) -> C_CommitResult
+        # Returns HLC-backed monotonic commit timestamp for MVCC observability
         lib.toondb_commit.argtypes = [ctypes.c_void_p, C_TxnHandle]
-        lib.toondb_commit.restype = ctypes.c_int
+        lib.toondb_commit.restype = C_CommitResult
         
         # toondb_abort(ptr: *mut DatabasePtr, handle: C_TxnHandle) -> c_int
         lib.toondb_abort.argtypes = [ctypes.c_void_p, C_TxnHandle]
@@ -273,6 +305,24 @@ class _FFI:
         # toondb_stats(ptr) -> C_StorageStats
         lib.toondb_stats.argtypes = [ctypes.c_void_p]
         lib.toondb_stats.restype = C_StorageStats
+        
+        # Per-Table Index Policy API
+        # toondb_set_table_index_policy(ptr, table_name, policy) -> c_int
+        # Sets index policy for a table: 0=WriteOptimized, 1=Balanced, 2=ScanOptimized, 3=AppendOnly
+        lib.toondb_set_table_index_policy.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_uint8
+        ]
+        lib.toondb_set_table_index_policy.restype = ctypes.c_int
+        
+        # toondb_get_table_index_policy(ptr, table_name) -> u8
+        # Gets index policy for a table. Returns 255 on error.
+        lib.toondb_get_table_index_policy.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p
+        ]
+        lib.toondb_get_table_index_policy.restype = ctypes.c_uint8
 
 
 class Transaction:
@@ -474,17 +524,49 @@ class Transaction:
         This method is safe for multi-tenant isolation - it will NEVER return
         keys from other tenants/prefixes.
         
+        Prefix Safety:
+            A minimum prefix length of 2 bytes is required to prevent
+            expensive full-database scans. Use scan_prefix_unchecked() if
+            you need unrestricted access for internal operations.
+        
         Args:
-            prefix: The prefix to match. All returned keys will start with this prefix.
+            prefix: The prefix to match (minimum 2 bytes). All returned keys
+                    will start with this prefix.
             
         Yields:
             (key, value) tuples where key.startswith(prefix) is True.
+            
+        Raises:
+            ValueError: If prefix is less than 2 bytes.
             
         Example:
             # Get all user keys - safe for multi-tenant
             for key, value in txn.scan_prefix(b"tenant_a/"):
                 print(f"{key}: {value}")
                 # Will NEVER include keys like b"tenant_b/..."
+        """
+        MIN_PREFIX_LEN = 2
+        if len(prefix) < MIN_PREFIX_LEN:
+            raise ValueError(
+                f"Prefix too short: {len(prefix)} bytes (minimum {MIN_PREFIX_LEN} required). "
+                f"Use scan_prefix_unchecked() for unrestricted prefix access."
+            )
+        return self.scan_prefix_unchecked(prefix)
+    
+    def scan_prefix_unchecked(self, prefix: bytes):
+        """
+        Scan keys matching a prefix without length validation.
+        
+        Warning:
+            This method allows empty/short prefixes which can cause expensive
+            full-database scans. Use scan_prefix() unless you specifically need
+            unrestricted prefix access for internal operations.
+        
+        Args:
+            prefix: The prefix to match. Can be empty for full scan.
+            
+        Yields:
+            (key, value) tuples where key.startswith(prefix) is True.
         """
         if self._committed or self._aborted:
             raise TransactionError("Transaction already completed")
@@ -631,19 +713,30 @@ class Transaction:
         Commit the transaction.
         
         Returns:
-            Commit timestamp.
+            Commit timestamp (HLC-backed, monotonically increasing).
+            This timestamp is suitable for:
+            - MVCC observability ("what commit did I read?")
+            - Replication and log shipping
+            - Agent audit trails
+            - Time-travel queries
+            - Deterministic replay
+            
+        Raises:
+            TransactionError: If commit fails (e.g., SSI conflict)
         """
         if self._committed:
             raise TransactionError("Transaction already committed")
         if self._aborted:
             raise TransactionError("Transaction already aborted")
         
-        res = self._lib.toondb_commit(self._db._handle, self._handle)
-        if res != 0:
+        result = self._lib.toondb_commit(self._db._handle, self._handle)
+        if result.error_code != 0:
+            if result.error_code == -2:
+                raise TransactionError("SSI conflict: transaction aborted due to serialization failure")
             raise TransactionError("Failed to commit transaction")
             
         self._committed = True
-        return 0 # TODO: Return actual commit timestamp if exposed
+        return result.commit_ts
     
     def abort(self) -> None:
         """Abort the transaction."""
@@ -727,29 +820,91 @@ class Database:
         Args:
             path: Path to the database directory.
             config: Optional configuration dictionary with keys:
-                - create_if_missing (bool): Create if missing (default: True)
-                - wal_enabled (bool): Enable WAL (default: True)
+                - wal_enabled (bool): Enable WAL for durability (default: True)
                 - sync_mode (str): 'full', 'normal', or 'off' (default: 'normal')
-                - memtable_size_bytes (int): Memtable size (default: 64MB)
+                    - 'off': No fsync, ~10x faster but risk of data loss
+                    - 'normal': Fsync at checkpoints, good balance (default)
+                    - 'full': Fsync every commit, safest but slowest
+                - memtable_size_bytes (int): Memtable size before flush (default: 64MB)
+                - group_commit (bool): Enable group commit for throughput (default: True)
+                - index_policy (str): Default index policy for tables:
+                    - 'write_optimized': O(1) insert, O(N) scan - for high-write
+                    - 'balanced': O(1) amortized insert, O(log K) scan - default
+                    - 'scan_optimized': O(log N) insert, O(log N + K) scan - for analytics
+                    - 'append_only': O(1) insert, O(N) scan - for time-series
             
         Returns:
             Database instance.
             
-        Note:
-            The config parameter is currently accepted but not yet fully 
-            implemented in v0.2.8. Future versions will apply these settings.
+        Example:
+            # Default configuration (good for most use cases)
+            db = Database.open("./my_database")
+            
+            # High-durability configuration
+            db = Database.open("./critical_data", config={
+                "sync_mode": "full",
+                "wal_enabled": True,
+            })
+            
+            # High-throughput configuration
+            db = Database.open("./logs", config={
+                "sync_mode": "off",
+                "group_commit": True,
+                "index_policy": "write_optimized",
+            })
         """
-        if config is not None:
-            warnings.warn(
-                "Database.open() config parameter is not yet fully implemented in v0.2.8. "
-                "Configuration options will be supported in future versions.",
-                FutureWarning,
-                stacklevel=2
-            )
-        
         lib = _FFI.get_lib()
         path_bytes = path.encode("utf-8")
-        handle = lib.toondb_open(path_bytes)
+        
+        if config is not None:
+            # Build C config struct from Python dict
+            c_config = C_DatabaseConfig()
+            
+            # WAL enabled
+            if "wal_enabled" in config:
+                c_config.wal_enabled = bool(config["wal_enabled"])
+                c_config.wal_enabled_set = True
+            
+            # Sync mode
+            if "sync_mode" in config:
+                mode = config["sync_mode"].lower() if isinstance(config["sync_mode"], str) else str(config["sync_mode"])
+                if mode in ("off", "0"):
+                    c_config.sync_mode = 0
+                elif mode in ("normal", "1"):
+                    c_config.sync_mode = 1
+                elif mode in ("full", "2"):
+                    c_config.sync_mode = 2
+                else:
+                    c_config.sync_mode = 1  # Default to normal
+                c_config.sync_mode_set = True
+            
+            # Memtable size
+            if "memtable_size_bytes" in config:
+                c_config.memtable_size_bytes = int(config["memtable_size_bytes"])
+            
+            # Group commit
+            if "group_commit" in config:
+                c_config.group_commit = bool(config["group_commit"])
+                c_config.group_commit_set = True
+            
+            # Index policy
+            if "index_policy" in config:
+                policy = config["index_policy"].lower() if isinstance(config["index_policy"], str) else str(config["index_policy"])
+                if policy == "write_optimized":
+                    c_config.default_index_policy = 0
+                elif policy == "balanced":
+                    c_config.default_index_policy = 1
+                elif policy == "scan_optimized":
+                    c_config.default_index_policy = 2
+                elif policy == "append_only":
+                    c_config.default_index_policy = 3
+                else:
+                    c_config.default_index_policy = 1  # Default to balanced
+                c_config.default_index_policy_set = True
+            
+            handle = lib.toondb_open_with_config(path_bytes, c_config)
+        else:
+            handle = lib.toondb_open(path_bytes)
         
         if not handle:
             raise DatabaseError(f"Failed to open database at {path}")
@@ -881,11 +1036,19 @@ class Database:
         which operates on an arbitrary range, scan_prefix() guarantees that
         only keys starting with the given prefix are returned.
         
+        Prefix Safety:
+            A minimum prefix length of 2 bytes is required to prevent
+            expensive full-database scans.
+        
         Args:
-            prefix: The prefix to match. All returned keys will start with this prefix.
+            prefix: The prefix to match (minimum 2 bytes). All returned keys
+                    will start with this prefix.
             
         Yields:
             (key, value) tuples where key.startswith(prefix) is True.
+            
+        Raises:
+            ValueError: If prefix is less than 2 bytes.
             
         Example:
             # Get all keys under "users/"
@@ -965,6 +1128,124 @@ class Database:
             "min_active_snapshot": stats.min_active_snapshot,
             "last_checkpoint_lsn": stats.last_checkpoint_lsn,
         }
+    
+    # =========================================================================
+    # Per-Table Index Policy API
+    # =========================================================================
+    
+    # Index policy constants
+    INDEX_WRITE_OPTIMIZED = 0
+    INDEX_BALANCED = 1
+    INDEX_SCAN_OPTIMIZED = 2
+    INDEX_APPEND_ONLY = 3
+    
+    _POLICY_NAMES = {
+        INDEX_WRITE_OPTIMIZED: "write_optimized",
+        INDEX_BALANCED: "balanced",
+        INDEX_SCAN_OPTIMIZED: "scan_optimized",
+        INDEX_APPEND_ONLY: "append_only",
+    }
+    
+    _POLICY_VALUES = {
+        "write_optimized": INDEX_WRITE_OPTIMIZED,
+        "write": INDEX_WRITE_OPTIMIZED,
+        "balanced": INDEX_BALANCED,
+        "default": INDEX_BALANCED,
+        "scan_optimized": INDEX_SCAN_OPTIMIZED,
+        "scan": INDEX_SCAN_OPTIMIZED,
+        "append_only": INDEX_APPEND_ONLY,
+        "append": INDEX_APPEND_ONLY,
+    }
+    
+    def set_table_index_policy(self, table: str, policy: Union[int, str]) -> None:
+        """
+        Set the index policy for a specific table.
+        
+        Index policies control the trade-off between write and read performance:
+        
+        - 'write_optimized' (0): O(1) writes, O(N) scans
+          Best for write-heavy tables with rare range queries.
+          
+        - 'balanced' (1): O(1) amortized writes, O(output + log K) scans
+          Good balance for mixed OLTP workloads. This is the default.
+          
+        - 'scan_optimized' (2): O(log N) writes, O(log N + K) scans
+          Best for analytics tables with frequent range queries.
+          
+        - 'append_only' (3): O(1) writes, O(N) forward-only scans
+          Best for time-series logs where data is naturally ordered.
+        
+        Args:
+            table: Table name (uses table prefix for key grouping)
+            policy: Policy name (str) or value (int)
+            
+        Raises:
+            ValueError: If policy is invalid
+            DatabaseError: If FFI call fails
+            
+        Example:
+            # For write-heavy user sessions
+            db.set_table_index_policy("sessions", "write_optimized")
+            
+            # For analytics queries
+            db.set_table_index_policy("events", "scan_optimized")
+        """
+        self._check_open()
+        
+        # Convert string policy to int
+        if isinstance(policy, str):
+            policy_value = self._POLICY_VALUES.get(policy.lower())
+            if policy_value is None:
+                raise ValueError(
+                    f"Invalid policy '{policy}'. Valid policies: "
+                    f"{list(self._POLICY_VALUES.keys())}"
+                )
+        else:
+            policy_value = int(policy)
+            if policy_value not in self._POLICY_NAMES:
+                raise ValueError(
+                    f"Invalid policy value {policy_value}. Valid values: 0-3"
+                )
+        
+        table_bytes = table.encode("utf-8")
+        result = self._lib.toondb_set_table_index_policy(
+            self._handle,
+            table_bytes,
+            policy_value
+        )
+        
+        if result == -1:
+            raise DatabaseError("Failed to set table index policy")
+        elif result == -2:
+            raise ValueError(f"Invalid policy value: {policy_value}")
+    
+    def get_table_index_policy(self, table: str) -> str:
+        """
+        Get the index policy for a specific table.
+        
+        Args:
+            table: Table name
+            
+        Returns:
+            Policy name as string: 'write_optimized', 'balanced', 
+            'scan_optimized', or 'append_only'
+            
+        Example:
+            policy = db.get_table_index_policy("users")
+            print(f"Users table uses {policy} indexing")
+        """
+        self._check_open()
+        
+        table_bytes = table.encode("utf-8")
+        policy_value = self._lib.toondb_get_table_index_policy(
+            self._handle,
+            table_bytes
+        )
+        
+        if policy_value == 255:
+            raise DatabaseError("Failed to get table index policy")
+        
+        return self._POLICY_NAMES.get(policy_value, "balanced")
     
     def execute(self, sql: str) -> 'SQLQueryResult':
         """

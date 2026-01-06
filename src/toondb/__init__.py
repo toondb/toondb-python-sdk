@@ -68,6 +68,44 @@ from .context import (
     estimate_tokens,
     split_by_tokens,
 )
+from .graph import (
+    # Graph Overlay (Task 10)
+    GraphOverlay,
+    GraphNode,
+    GraphEdge,
+    TraversalOrder,
+)
+from .policy import (
+    # Policy & Safety Hooks (Task 11)
+    PolicyEngine,
+    PolicyAction,
+    PolicyTrigger,
+    PolicyResult,
+    PolicyContext,
+    PolicyHandler,
+    PatternPolicy,
+    RateLimiter,
+    PolicyViolation,
+    # Built-in policy helpers
+    deny_all,
+    allow_all,
+    require_agent_id,
+    redact_value,
+    log_and_allow,
+)
+from .routing import (
+    # Tool Routing (Task 12)
+    ToolRouter,
+    AgentRegistry,
+    ToolDispatcher,
+    Tool,
+    Agent,
+    ToolCategory,
+    RoutingStrategy,
+    AgentStatus,
+    RouteResult,
+    RoutingContext,
+)
 
 # Vector search (optional - requires libtoondb_index)
 try:
@@ -105,7 +143,143 @@ except ImportError:
     is_analytics_disabled = lambda: True
 
 __version__ = "0.3.1"
+
+
+# =============================================================================
+# Unified Connection API (Task 9: Standardize Deployment Modes)
+# =============================================================================
+
+from enum import Enum
+from typing import Optional, Union
+
+
+class ConnectionMode(Enum):
+    """ToonDB connection mode."""
+    EMBEDDED = "embedded"    # Direct FFI to Rust library
+    IPC = "ipc"              # Unix socket to local server
+    GRPC = "grpc"            # gRPC to remote server
+
+
+def connect(
+    path_or_url: str,
+    mode: Optional[Union[str, ConnectionMode]] = None,
+    config: Optional[dict] = None,
+) -> Union[Database, IpcClient]:
+    """
+    Connect to ToonDB with automatic mode detection.
+    
+    This is the unified entry point for all ToonDB connection modes.
+    If mode is not specified, it auto-detects based on the path/URL:
+    
+    - Embedded: File paths (./data, /tmp/db, ~/toondb)
+    - IPC: Unix socket paths (/tmp/toondb.sock, unix://...)
+    - gRPC: URLs with grpc:// scheme or host:port format
+    
+    Args:
+        path_or_url: Database path, socket path, or gRPC URL
+        mode: Optional explicit mode ('embedded', 'ipc', 'grpc' or ConnectionMode enum)
+        config: Optional configuration dict (passed to underlying client)
+        
+    Returns:
+        Database, IpcClient, or GrpcClient depending on mode
+        
+    Examples:
+        # Embedded mode (auto-detected from file path)
+        db = toondb.connect("./my_database")
+        db.put(b"key", b"value")
+        
+        # IPC mode (auto-detected from .sock extension)
+        db = toondb.connect("/tmp/toondb.sock")
+        
+        # gRPC mode (auto-detected from host:port)
+        db = toondb.connect("localhost:50051")
+        
+        # Explicit mode
+        db = toondb.connect("./data", mode="embedded", config={
+            "sync_mode": "full",
+            "index_policy": "scan_optimized",
+        })
+        
+        # Using enum
+        db = toondb.connect("localhost:50051", mode=toondb.ConnectionMode.GRPC)
+    """
+    # Normalize mode to enum
+    if mode is None:
+        detected_mode = _detect_mode(path_or_url)
+    elif isinstance(mode, str):
+        try:
+            detected_mode = ConnectionMode(mode.lower())
+        except ValueError:
+            raise ValueError(
+                f"Invalid mode '{mode}'. Valid modes: embedded, ipc, grpc"
+            )
+    else:
+        detected_mode = mode
+    
+    # Create appropriate client
+    if detected_mode == ConnectionMode.EMBEDDED:
+        return Database.open(path_or_url, config=config)
+    
+    elif detected_mode == ConnectionMode.IPC:
+        socket_path = path_or_url
+        if socket_path.startswith("unix://"):
+            socket_path = socket_path[7:]  # Strip unix:// prefix
+        return IpcClient(socket_path)
+    
+    elif detected_mode == ConnectionMode.GRPC:
+        try:
+            from .grpc_client import GrpcClient
+            url = path_or_url
+            if url.startswith("grpc://"):
+                url = url[7:]  # Strip grpc:// prefix
+            return GrpcClient(url)
+        except ImportError:
+            raise ImportError(
+                "gRPC mode requires grpc dependencies. "
+                "Install with: pip install toondb[grpc]"
+            )
+    
+    else:
+        raise ValueError(f"Unknown connection mode: {detected_mode}")
+
+
+def _detect_mode(path_or_url: str) -> ConnectionMode:
+    """Auto-detect connection mode from path/URL format."""
+    import os
+    
+    # Explicit scheme detection
+    if path_or_url.startswith("grpc://"):
+        return ConnectionMode.GRPC
+    if path_or_url.startswith("unix://"):
+        return ConnectionMode.IPC
+    
+    # Socket file detection
+    if path_or_url.endswith(".sock"):
+        return ConnectionMode.IPC
+    if "/tmp/" in path_or_url and "sock" in path_or_url.lower():
+        return ConnectionMode.IPC
+    
+    # Host:port detection (gRPC)
+    if ":" in path_or_url:
+        parts = path_or_url.rsplit(":", 1)
+        if len(parts) == 2:
+            try:
+                port = int(parts[1])
+                if 1 <= port <= 65535:
+                    # Looks like host:port - probably gRPC
+                    return ConnectionMode.GRPC
+            except ValueError:
+                pass
+    
+    # Default to embedded for file paths
+    return ConnectionMode.EMBEDDED
+
+
 __all__ = [
+    # Unified API (Task 9)
+    "connect",
+    "ConnectionMode",
+    
     # Core
     "Database",
     "Transaction", 
@@ -128,6 +302,40 @@ __all__ = [
     "SearchRequest",
     "SearchResult",
     "SearchResults",
+    
+    # Graph Overlay (Task 10)
+    "GraphOverlay",
+    "GraphNode",
+    "GraphEdge",
+    "TraversalOrder",
+    
+    # Policy & Safety Hooks (Task 11)
+    "PolicyEngine",
+    "PolicyAction",
+    "PolicyTrigger",
+    "PolicyResult",
+    "PolicyContext",
+    "PolicyHandler",
+    "PatternPolicy",
+    "RateLimiter",
+    "PolicyViolation",
+    "deny_all",
+    "allow_all",
+    "require_agent_id",
+    "redact_value",
+    "log_and_allow",
+    
+    # Tool Routing (Task 12)
+    "ToolRouter",
+    "AgentRegistry",
+    "ToolDispatcher",
+    "Tool",
+    "Agent",
+    "ToolCategory",
+    "RoutingStrategy",
+    "AgentStatus",
+    "RouteResult",
+    "RoutingContext",
     
     # ContextQuery (Task 12)
     "ContextQuery",
