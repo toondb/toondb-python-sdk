@@ -43,7 +43,46 @@ pip install toondb-client
 
 > ℹ️ **About the Binaries**: This Python SDK packages pre-compiled binaries from the [main ToonDB repository](https://github.com/toondb/toondb). Each wheel contains platform-specific executables (`toondb-bulk`, `toondb-server`, `toondb-grpc-server`) and native FFI libraries. See [RELEASE.md](RELEASE.md) for details on the release process.
 
-## What's New in Latest Release
+## What's New in v0.3.3
+
+### 🕸️ Graph Overlay for Agent Memory
+Build lightweight graph structures on top of ToonDB's KV storage for agent memory:
+
+```python
+from toondb import Database, GraphOverlay
+
+db = Database.open("./agent_db")
+graph = GraphOverlay(db, namespace="agent_memory")
+
+# Add nodes (entities, concepts, events)
+graph.add_node("user_alice", "person", {"name": "Alice", "role": "developer"})
+graph.add_node("conv_123", "conversation", {"topic": "ToonDB features"})
+graph.add_node("action_456", "action", {"type": "code_commit", "status": "success"})
+
+# Add edges (relationships, causality, references)
+graph.add_edge("user_alice", "started", "conv_123", {"timestamp": "2026-01-05"})
+graph.add_edge("conv_123", "triggered", "action_456", {"reason": "user request"})
+
+# Retrieve nodes and edges
+node = graph.get_node("user_alice")
+edges = graph.get_edges("user_alice", edge_type="started")
+
+# Graph traversal
+visited = graph.bfs_traversal("user_alice", max_depth=3)  # BFS from Alice
+path = graph.shortest_path("user_alice", "action_456")  # Find connection
+
+# Get neighbors
+neighbors = graph.get_neighbors("conv_123", direction="both")
+
+# Extract subgraph
+subgraph = graph.get_subgraph(["user_alice", "conv_123", "action_456"])
+```
+
+**Use Cases:**
+- Agent conversation history with causal chains
+- Entity relationship tracking across sessions
+- Action dependency graphs for planning
+- Knowledge graph construction
 
 ### 🛡️ Policy & Safety Hooks
 Enforce safety policies on agent operations with pre/post triggers:

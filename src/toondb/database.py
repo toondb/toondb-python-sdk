@@ -1063,6 +1063,24 @@ class Database:
         with self.transaction() as txn:
             yield from txn.scan_prefix(prefix)
     
+    def scan_prefix_unchecked(self, prefix: bytes):
+        """
+        Scan keys matching a prefix without length validation (auto-commit transaction).
+        
+        Warning:
+            This method allows empty/short prefixes which can cause expensive
+            full-database scans. Use scan_prefix() unless you specifically need
+            unrestricted prefix access for internal operations like graph overlay.
+        
+        Args:
+            prefix: The prefix to match. Can be empty for full scan.
+            
+        Yields:
+            (key, value) tuples where key.startswith(prefix) is True.
+        """
+        with self.transaction() as txn:
+            yield from txn.scan_prefix_unchecked(prefix)
+    
     def delete_path(self, path: str) -> None:
         """
         Delete at a path (auto-commit).
