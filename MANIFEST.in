@@ -1,0 +1,16 @@
+# Include all binary files and shared libraries
+recursive-include src/toondb/_bin *
+recursive-include src/toondb/lib *.so *.dylib *.dll
+
+# Include proto files
+recursive-include src/toondb/proto *.proto
+
+# Include documentation
+include README.md
+include LICENSE
+include CONTRIBUTING.md
+
+# Exclude Python cache and build artifacts
+global-exclude __pycache__
+global-exclude *.py[co]
+global-exclude .DS_Store
