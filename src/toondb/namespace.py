@@ -309,6 +309,18 @@ class Collection:
         self._config = config
         self._db = namespace._db
     
+    # ========================================================================
+    # Storage Key Helpers
+    # ========================================================================
+    
+    def _vector_key(self, doc_id: Union[str, int]) -> bytes:
+        """Key for storing vector + metadata."""
+        return f"{self.namespace_name}/collections/{self.name}/vectors/{doc_id}".encode()
+    
+    def _vectors_prefix(self) -> bytes:
+        """Prefix for all vectors in this collection."""
+        return f"{self.namespace_name}/collections/{self.name}/vectors/".encode()
+    
     @property
     def name(self) -> str:
         """Collection name."""
@@ -370,12 +382,22 @@ class Collection:
             Number of documents inserted
         """
         # Validate dimensions
-        for id, vector, metadata, content in documents:
+        for doc_id, vector, metadata, content in documents:
             if len(vector) != self._config.dimension:
                 raise DimensionMismatchError(self._config.dimension, len(vector))
         
-        # Store via namespace-scoped key
-        # (Implementation would call actual storage layer)
+        # Store via namespace-scoped key in KV layer
+        with self._db.transaction() as txn:
+            for doc_id, vector, metadata, content in documents:
+                doc_data = {
+                    "id": doc_id,
+                    "vector": vector,
+                    "metadata": metadata or {},
+                    "content": content,
+                }
+                key = self._vector_key(doc_id)
+                txn.put(key, json.dumps(doc_data).encode())
+        
         return len(documents)
     
     def insert_multi(
@@ -559,8 +581,11 @@ class Collection:
     
     def get(self, id: Union[str, int]) -> Optional[Dict[str, Any]]:
         """Get a document by ID."""
-        # TODO: Implement via FFI
-        return None
+        key = self._vector_key(id)
+        data = self._db.get(key)
+        if data is None:
+            return None
+        return json.loads(data.decode())
     
     def delete(self, id: Union[str, int]) -> bool:
         """
@@ -569,13 +594,21 @@ class Collection:
         Uses tombstone-based logical deletion. The vector remains in the
         index but won't be returned in search results.
         """
-        # TODO: Implement via tombstone manager
+        key = self._vector_key(id)
+        with self._db.transaction() as txn:
+            if txn.get(key) is None:
+                return False
+            txn.delete(key)
         return True
     
     def count(self) -> int:
         """Get the number of documents (excluding deleted)."""
-        # TODO: Implement via FFI
-        return 0
+        prefix = self._vectors_prefix()
+        count = 0
+        with self._db.transaction() as txn:
+            for _ in txn.scan_prefix(prefix):
+                count += 1
+        return count
 
 
 # ============================================================================
