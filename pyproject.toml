@@ -73,12 +73,14 @@ toondb = [
     "lib/*/*.so",
     "lib/*/*.dylib", 
     "lib/*/*.dll",
-    "lib/*/*",
-    # Bundled CLI binaries and executables
-    "_bin/*/*",
-    "_bin/*/*/*",
-    # Include proto files
-    "proto/*.proto",
+    # Root lib directory (fallback)
+    "lib/*.so",
+    "lib/*.dylib",
+    "lib/*.dll",
+    # Bundled CLI binaries (bulk operations)
+    "_bin/**/toondb-bulk",
+    "_bin/**/toondb-bulk.exe",
+    "_bin/**/*",
 ]
 
 [tool.pytest.ini_options]
