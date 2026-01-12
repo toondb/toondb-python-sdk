@@ -3,7 +3,7 @@ requires = ["setuptools>=45", "wheel", "setuptools-rust>=1.7"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sochdb-client"
+name = "sochdb"
 version = "0.4.0"
 description = "SochDB is an AI-native database with token-optimized output, O(|path|) lookups, built-in vector search, and durable transactions."
 readme = "README.md"
