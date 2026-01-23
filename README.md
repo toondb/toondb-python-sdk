@@ -84,26 +84,27 @@ LLM-Optimized Embedded Database with Native Vector Search
 15. [Semantic Cache](#15-semantic-cache)
 16. [Context Query Builder (LLM Optimization) and Session](#16-context-query-builder-llm-optimization)
 17. [Priority Queue & Task Management](#17-priority-queue--task-management)
-18. [Atomic Multi-Index Writes](#18-atomic-multi-index-writes)
-19. [Recovery & WAL Management](#19-recovery--wal-management)
-20. [Checkpoints & Snapshots](#20-checkpoints--snapshots)
-21. [Compression & Storage](#21-compression--storage)
-22. [Statistics & Monitoring](#22-statistics--monitoring)
-23. [Distributed Tracing](#23-distributed-tracing)
-24. [Workflow & Run Tracking](#24-workflow--run-tracking)
-25. [Server Mode (gRPC Client)](#25-server-mode-grpc-client)
-26. [IPC Client (Unix Sockets)](#26-ipc-client-unix-sockets)
-27. [Standalone VectorIndex](#27-standalone-vectorindex)
-28. [Vector Utilities](#28-vector-utilities)
-29. [Data Formats (TOON/JSON/Columnar)](#29-data-formats-toonjsoncolumnar)
-30. [Policy Service](#30-policy-service)
-31. [MCP (Model Context Protocol)](#31-mcp-model-context-protocol)
-32. [Configuration Reference](#32-configuration-reference)
-33. [Error Handling](#33-error-handling)
-34. [Async Support](#34-async-support)
-35. [Building & Development](#35-building--development)
-36. [Complete Examples](#36-complete-examples)
-37. [Migration Guide](#37-migration-guide)
+18. [Memory System (LLM-Native)](#18-memory-system-llm-native)
+19. [Atomic Multi-Index Writes](#19-atomic-multi-index-writes)
+20. [Recovery & WAL Management](#20-recovery--wal-management)
+21. [Checkpoints & Snapshots](#21-checkpoints--snapshots)
+22. [Compression & Storage](#22-compression--storage)
+23. [Statistics & Monitoring](#23-statistics--monitoring)
+24. [Distributed Tracing](#24-distributed-tracing)
+25. [Workflow & Run Tracking](#25-workflow--run-tracking)
+26. [Server Mode (gRPC Client)](#26-server-mode-grpc-client)
+27. [IPC Client (Unix Sockets)](#27-ipc-client-unix-sockets)
+28. [Standalone VectorIndex](#28-standalone-vectorindex)
+29. [Vector Utilities](#29-vector-utilities)
+30. [Data Formats (TOON/JSON/Columnar)](#30-data-formats-toonjsoncolumnar)
+31. [Policy Service](#31-policy-service)
+32. [MCP (Model Context Protocol)](#32-mcp-model-context-protocol)
+33. [Configuration Reference](#33-configuration-reference)
+34. [Error Handling](#34-error-handling)
+35. [Async Support](#35-async-support)
+36. [Building & Development](#36-building--development)
+37. [Complete Examples](#37-complete-examples)
+38. [Migration Guide](#38-migration-guide)
 
 ---
 
@@ -2290,7 +2291,343 @@ if task:
 
 ---
 
-## 18. Atomic Multi-Index Writes
+## 18. Memory System (LLM-Native)
+
+SochDB provides a complete memory system for AI agents with extraction, consolidation, retrieval, and namespace isolation. All components support both embedded (FFI) and server (gRPC) modes.
+
+### Features
+
+- **Extraction Pipeline**: Compile LLM outputs into typed, validated facts (Entity, Relation, Assertion)
+- **Event-Sourced Consolidation**: Append-only events with derived canonical facts (no destructive updates)
+- **Hybrid Retrieval**: RRF fusion with pre-filtering for multi-tenant safety
+- **Namespace Isolation**: Strong tenant isolation with explicit, auditable cross-namespace grants
+
+### Quick Start
+
+```python
+from sochdb import Database
+from sochdb.memory import (
+    Entity, Relation, Assertion,
+    ExtractionPipeline, Consolidator, HybridRetriever,
+    NamespaceManager, AllowedSet,
+)
+
+# Open database
+db = Database.open("./memory_db")
+
+# Create extraction pipeline
+pipeline = ExtractionPipeline.from_database(db, namespace="user_123")
+
+# Define an LLM extractor (your LLM integration)
+def my_extractor(text):
+    # Call your LLM here and return structured output
+    return {
+        "entities": [
+            {"name": "Alice", "entity_type": "person"},
+            {"name": "Acme Corp", "entity_type": "organization"},
+        ],
+        "relations": [
+            {"from_entity": "Alice", "relation_type": "works_at", "to_entity": "Acme Corp"},
+        ],
+        "assertions": [
+            {"subject": "Alice", "predicate": "role", "object": "Engineer", "confidence": 0.95},
+        ],
+    }
+
+# Extract and commit
+result = pipeline.extract_and_commit("Alice is an engineer at Acme Corp", extractor=my_extractor)
+print(f"Extracted {len(result.entities)} entities, {len(result.relations)} relations")
+```
+
+### Extraction Pipeline
+
+The extraction pipeline compiles LLM outputs into typed, validated facts:
+
+```python
+from sochdb.memory import (
+    Entity, Relation, Assertion, ExtractionPipeline, ExtractionSchema
+)
+
+# Create with schema validation
+schema = ExtractionSchema(
+    entity_types=["person", "organization", "location"],
+    relation_types=["works_at", "knows", "located_in"],
+    min_confidence=0.5,
+)
+
+pipeline = ExtractionPipeline.from_database(
+    db, 
+    namespace="user_123",
+    schema=schema,
+)
+
+# Extract entities and relations
+result = pipeline.extract(
+    text="John works at Google in Mountain View",
+    extractor=my_llm_extractor,
+)
+
+# Inspect before committing
+for entity in result.entities:
+    print(f"Entity: {entity.name} ({entity.entity_type})")
+
+for relation in result.relations:
+    print(f"Relation: {relation.from_entity} --{relation.relation_type}--> {relation.to_entity}")
+
+# Commit atomically
+pipeline.commit(result)
+```
+
+### Event-Sourced Consolidation
+
+Consolidation maintains append-only events and derives canonical facts without destructive updates:
+
+```python
+from sochdb.memory import Consolidator, RawAssertion, ConsolidationConfig
+
+# Create consolidator
+config = ConsolidationConfig(
+    similarity_threshold=0.85,
+    use_temporal_updates=True,
+)
+consolidator = Consolidator.from_database(db, namespace="user_123", config=config)
+
+# Add assertions (immutable events)
+assertion = RawAssertion(
+    id="",  # Auto-generated
+    fact={"subject": "Alice", "predicate": "lives_in", "object": "SF"},
+    source="conversation_123",
+    confidence=0.9,
+)
+consolidator.add(assertion)
+
+# Handle contradictions (temporal interval update, not deletion)
+new_assertion = RawAssertion(
+    id="",
+    fact={"subject": "Alice", "predicate": "lives_in", "object": "NYC"},
+    source="conversation_456",
+    confidence=0.95,
+)
+consolidator.add_with_contradiction(
+    new_assertion=new_assertion,
+    contradicts=["old_assertion_id"],
+)
+
+# Run consolidation (update canonical view)
+updated_count = consolidator.consolidate()
+
+# Get canonical facts
+facts = consolidator.get_canonical_facts()
+for fact in facts:
+    print(f"Fact: {fact.merged_fact}, confidence: {fact.confidence}")
+
+# Explain provenance
+explanation = consolidator.explain(fact_id="some_fact_id")
+print(f"Evidence: {explanation['evidence_count']} supporting assertions")
+```
+
+### Hybrid Retrieval with Pre-Filtering
+
+Retrieval uses RRF fusion with security-first pre-filtering:
+
+```python
+from sochdb.memory import HybridRetriever, AllowedSet, RetrievalConfig
+
+# Create retriever
+config = RetrievalConfig(
+    k=10,
+    alpha=0.5,  # Balance between vector (1.0) and keyword (0.0)
+    enable_rerank=False,
+)
+retriever = HybridRetriever.from_database(
+    db, 
+    namespace="user_123",
+    collection="documents",
+    config=config,
+)
+
+# Retrieve with namespace isolation (security invariant)
+response = retriever.retrieve(
+    query_text="machine learning papers",
+    query_vector=[0.1, 0.2, ...],  # Your embedding
+    allowed=AllowedSet.from_namespace("user_123"),  # Pre-filter
+    k=10,
+)
+
+for result in response.results:
+    print(f"{result.id}: {result.score:.3f}")
+
+# Explain ranking for debugging
+explanation = retriever.explain(
+    query_text="machine learning",
+    query_vector=[0.1, 0.2, ...],
+    doc_id="some_doc_id",
+)
+print(f"Vector rank: {explanation.get('vector_rank')}")
+print(f"Keyword rank: {explanation.get('keyword_rank')}")
+print(f"Expected RRF score: {explanation.get('expected_rrf_score')}")
+```
+
+### AllowedSet (Pre-Filtering)
+
+`AllowedSet` enforces the security invariant: `Results ⊆ allowed_set`
+
+```python
+from sochdb.memory import AllowedSet
+
+# Allow by explicit IDs
+allowed = AllowedSet.from_ids(["doc1", "doc2", "doc3"])
+
+# Allow by namespace prefix
+allowed = AllowedSet.from_namespace("user_123")
+
+# Allow by custom filter function
+allowed = AllowedSet.from_filter(
+    lambda doc_id, metadata: metadata.get("tenant") == "acme"
+)
+
+# Allow all (trusted context only)
+allowed = AllowedSet.allow_all()
+
+# Check membership
+print(allowed.contains("user_123_doc1"))  # True for namespace filter
+```
+
+### Namespace Isolation
+
+Strong multi-tenant isolation with explicit cross-namespace grants:
+
+```python
+from sochdb.memory import NamespaceManager, NamespacePolicy
+
+# Create namespace manager
+manager = NamespaceManager.from_database(
+    db,
+    policy=NamespacePolicy.STRICT,  # No cross-namespace by default
+)
+
+# Create namespaces
+manager.create("user_alice", metadata={"plan": "pro"})
+manager.create("user_bob", metadata={"plan": "free"})
+
+# Get scoped interface (all operations isolated)
+alice_scope = manager.scope("user_alice")
+
+# Operations are automatically scoped
+response = alice_scope.retrieve(query_text="my documents")
+# Returns ONLY user_alice's documents (guaranteed)
+
+# Cross-namespace access (EXPLICIT policy required)
+manager_explicit = NamespaceManager.from_database(
+    db,
+    policy=NamespacePolicy.EXPLICIT,
+)
+
+grant = manager_explicit.create_grant(
+    from_namespace="user_alice",
+    to_namespace="shared_docs",
+    operations=["retrieve"],
+    expires_in_seconds=3600,
+    reason="Collaboration project",
+)
+
+alice_with_grant = alice_scope.with_grant(grant)
+response = alice_with_grant.retrieve_with_grants(query_text="shared documents")
+```
+
+### gRPC/Server Mode
+
+All memory components work with gRPC client:
+
+```python
+from sochdb import SochDBClient
+from sochdb.memory import (
+    ExtractionPipeline, Consolidator, HybridRetriever, NamespaceManager,
+)
+
+# Connect to server
+client = SochDBClient("localhost:50051")
+
+# Create components with gRPC backend
+pipeline = ExtractionPipeline.from_client(client, namespace="user_123")
+consolidator = Consolidator.from_client(client, namespace="user_123")
+retriever = HybridRetriever.from_client(client, namespace="user_123")
+manager = NamespaceManager.from_client(client)
+
+# Use exactly the same API as embedded mode
+result = pipeline.extract_and_commit(text, extractor=my_extractor)
+```
+
+### In-Memory Backend (Testing)
+
+For testing without persistence:
+
+```python
+from sochdb.memory import (
+    InMemoryBackend, InMemoryConsolidationBackend, 
+    InMemoryRetrievalBackend, InMemoryNamespaceBackend,
+    ExtractionPipeline, Consolidator, HybridRetriever, NamespaceManager,
+)
+
+# Create in-memory backends
+backend = InMemoryBackend()
+pipeline = ExtractionPipeline.from_backend(backend, namespace="test")
+
+# Perfect for unit tests
+result = pipeline.extract(text, extractor=mock_extractor)
+assert len(result.entities) == 2
+```
+
+### Data Models
+
+#### Entity
+
+```python
+from sochdb.memory import Entity
+
+entity = Entity(
+    name="John Doe",
+    entity_type="person",
+    properties={"role": "engineer", "department": "AI"},
+    confidence=0.95,
+    provenance="document_123",
+)
+print(entity.id)  # Deterministic ID from name + type
+```
+
+#### Relation
+
+```python
+from sochdb.memory import Relation
+
+relation = Relation(
+    from_entity="john_entity_id",
+    relation_type="works_at",
+    to_entity="company_entity_id",
+    confidence=0.9,
+)
+```
+
+#### Assertion
+
+```python
+from sochdb.memory import Assertion
+
+assertion = Assertion(
+    subject="john_entity_id",
+    predicate="believes",
+    object="AI will transform healthcare",
+    valid_from=1706000000000,  # Unix ms
+    valid_until=0,  # 0 = still valid
+    confidence=0.85,
+    embedding=[0.1, 0.2, ...],  # Optional
+)
+print(assertion.is_current())  # True if valid now
+```
+
+---
+
+## 19. Atomic Multi-Index Writes
 
 Ensure consistency across KV storage, vectors, and graphs with atomic operations.
 
@@ -2363,7 +2700,7 @@ print(f"Status: {result.status}")  # "committed"
 
 ---
 
-## 19. Recovery & WAL Management
+## 20. Recovery & WAL Management
 
 SochDB uses Write-Ahead Logging (WAL) for durability with automatic recovery.
 
@@ -2442,7 +2779,7 @@ db = open_with_recovery("./my_database")
 
 ---
 
-## 20. Checkpoints & Snapshots
+## 21. Checkpoints & Snapshots
 
 ### Application Checkpoints
 
@@ -2516,7 +2853,7 @@ db.put(b"key1", b"new_value")  # Snapshot doesn't see this
 
 ---
 
-## 21. Compression & Storage
+## 22. Compression & Storage
 
 ### Compression Settings
 
@@ -2571,7 +2908,7 @@ print(f"Running compactions: {stats.running_compactions}")
 
 ---
 
-## 22. Statistics & Monitoring
+## 23. Statistics & Monitoring
 
 ### Database Statistics
 
@@ -2622,7 +2959,7 @@ print(f"Writes/sec: {metrics.writes_per_second}")
 
 ---
 
-## 23. Distributed Tracing
+## 24. Distributed Tracing
 
 Track operations for debugging and performance analysis.
 
@@ -2700,7 +3037,7 @@ traces.log_llm_call(
 
 ---
 
-## 24. Workflow & Run Tracking
+## 25. Workflow & Run Tracking
 
 Track long-running workflows with events and state.
 
@@ -2770,7 +3107,7 @@ workflow_svc.update_run_status("run_123", RunStatus.FAILED)
 
 ---
 
-## 25. Server Mode (gRPC Client)
+## 26. Server Mode (gRPC Client)
 
 Full-featured client for distributed deployments.
 
@@ -2898,7 +3235,7 @@ print(f"Tokens used: {context.token_count}")
 
 ---
 
-## 26. IPC Client (Unix Sockets)
+## 27. IPC Client (Unix Sockets)
 
 Local server communication via Unix sockets (lower latency than gRPC).
 
@@ -2939,7 +3276,7 @@ client.close()
 
 ---
 
-## 27. Standalone VectorIndex
+## 28. Standalone VectorIndex
 
 Direct HNSW index operations without collections.
 
@@ -2987,7 +3324,7 @@ index = VectorIndex.load("./index.bin")
 
 ---
 
-## 28. Vector Utilities
+## 29. Vector Utilities
 
 Standalone vector operations for preprocessing and analysis.
 
@@ -3025,7 +3362,7 @@ similarity = vector.cosine_similarity(a, b)
 
 ---
 
-## 29. Data Formats (TOON/JSON/Columnar)
+## 30. Data Formats (TOON/JSON/Columnar)
 
 ### Wire Formats
 
@@ -3083,7 +3420,7 @@ if FormatCapabilities.supports_round_trip(WireFormat.TOON):
 
 ---
 
-## 30. Policy Service
+## 31. Policy Service
 
 Register and evaluate access control policies.
 
@@ -3134,7 +3471,7 @@ policy_svc.delete("old_policy")
 
 ---
 
-## 31. MCP (Model Context Protocol)
+## 32. MCP (Model Context Protocol)
 
 Integrate SochDB as an MCP tool provider.
 
@@ -3188,7 +3525,7 @@ client.register_mcp_tool(
 
 ---
 
-## 32. Configuration Reference
+## 33. Configuration Reference
 
 ### Database Configuration
 
@@ -3249,7 +3586,7 @@ db = Database.open("./my_db", config={
 
 ---
 
-## 33. Error Handling
+## 34. Error Handling
 
 ### Error Types
 
@@ -3342,7 +3679,7 @@ except SochDBError as e:
 
 ---
 
-## 34. Async Support
+## 35. Async Support
 
 Optional async/await support for non-blocking operations.
 
@@ -3379,7 +3716,7 @@ asyncio.run(main())
 
 ---
 
-## 35. Building & Development
+## 36. Building & Development
 
 ### Building Native Extensions
 
@@ -3447,7 +3784,7 @@ sochdb/
 
 ---
 
-## 36. Complete Examples
+## 37. Complete Examples
 
 ### RAG Pipeline Example
 
@@ -3616,7 +3953,7 @@ db.close()
 
 ---
 
-## 37. Migration Guide
+## 38. Migration Guide
 
 ### From v0.2.x to v0.3.x
 

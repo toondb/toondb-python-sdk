@@ -5,6 +5,52 @@ All notable changes to the SochDB Python SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-01-23
+
+### Added
+
+#### LLM-Native Memory System
+
+A complete memory management system for AI agents with FFI/gRPC dual-mode support:
+
+**Extraction Pipeline** (`sochdb.memory.extraction`):
+- `Entity`, `Relation`, `Assertion` typed intermediate representation
+- `ExtractionSchema` for validation with type constraints and confidence thresholds
+- `ExtractionPipeline` with atomic commits
+- Deterministic ID generation via content hashing
+
+**Event-Sourced Consolidation** (`sochdb.memory.consolidation`):
+- `RawAssertion` immutable events (append-only, never deleted)
+- `CanonicalFact` derived view (merged, deduplicated)
+- `UnionFind` clustering with O(α(n)) operations
+- Temporal interval updates for contradictions (not destructive edits)
+- Full provenance tracking with `explain()` method
+
+**Hybrid Retrieval** (`sochdb.memory.retrieval`):
+- `AllowedSet` for pre-filtering (security invariant: Results ⊆ allowed_set)
+- RRF fusion leveraging SochDB's built-in implementation
+- Optional cross-encoder reranking support
+- `HybridRetriever` with `explain()` for ranking debugging
+
+**Namespace Isolation** (`sochdb.memory.isolation`):
+- `NamespaceId` strongly-typed identifier with validation
+- `ScopedQuery` for type-level safety guarantees
+- `NamespaceGrant` for explicit, auditable cross-namespace access
+- `ScopedNamespace` with full audit logging
+- `NamespaceManager` for namespace lifecycle management
+- Policy modes: `STRICT`, `EXPLICIT`, `AUDIT_ONLY`
+
+All modules include:
+- FFI backend (embedded mode)
+- gRPC backend (server mode)
+- In-memory backend (testing)
+- Factory functions with auto-detection
+
+### Documentation
+- Added comprehensive Memory System section (Section 18) to README
+- Full API documentation with usage examples
+- Updated Table of Contents
+
 ## [0.2.3] - 2025-01-xx
 
 ### Fixed
