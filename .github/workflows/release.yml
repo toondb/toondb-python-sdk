@@ -386,7 +386,7 @@ jobs:
           ### Installation
           
           ```bash
-          pip install sochdb-client==${{ inputs.version }}
+          pip install sochdb==${{ inputs.version }}
           ```
           
           ### What's Included
