@@ -1,4 +1,4 @@
-# SochDB Python SDK v0.4.0
+# SochDB Python SDK
 
 > **📢 Note:** This project has been renamed from **ToonDB** to **SochDB**. All references, packages, and APIs have been updated accordingly. If you're upgrading from ToonDB, please update your imports from `toondb` to `sochdb`.
 
@@ -61,7 +61,7 @@ pip install -e .
 
 # SochDB Python SDK Documentation
 
-**Version 0.4.0** | LLM-Optimized Embedded Database with Native Vector Search
+LLM-Optimized Embedded Database with Native Vector Search
 
 ---
 
@@ -900,7 +900,21 @@ collection = ns.create_collection(
 collection = ns.collection("documents")
 ```
 
-### Inserting Documents
+### API Methods Overview
+
+| Method | Purpose | Usage |
+|--------|---------|-------|
+| `add(ids, embeddings/vectors, metadatas)` | Bulk insert/update | Batch operations |
+| `upsert(ids, embeddings/vectors, metadatas)` | Insert or update | Batch upsert |
+| `query(query_embeddings, n_results, where)` | Search vectors | Standard query |
+| `insert(id, vector, metadata)` | Single insert | Single document |
+| `insert_batch(ids, vectors, metadatas)` | Bulk insert | Batch insert |
+| `search(SearchRequest)` | Advanced search | Full control |
+| `vector_search(vector, k, filter)` | Vector similarity | Convenience method |
+| `keyword_search(query, k, filter)` | BM25 search | Text search |
+| `hybrid_search(vector, text_query, k, alpha)` | Vector + BM25 | Combined search |
+
+### Adding Documents
 
 ```python
 # Single insert
@@ -910,11 +924,29 @@ collection.insert(
     metadata={"title": "Introduction", "author": "Alice", "category": "tech"}
 )
 
-# Batch insert (more efficient for bulk loading)
+# Batch add
+collection.add(
+    ids=["doc1", "doc2", "doc3"],
+    embeddings=[[...], [...], [...]],  # or vectors=[[...], ...]
+    metadatas=[
+        {"title": "Doc 1"},
+        {"title": "Doc 2"},
+        {"title": "Doc 3"}
+    ]
+)
+
+# Upsert (insert or update)
+collection.upsert(
+    ids=["doc1", "doc2"],
+    embeddings=[[...], [...]],  # or vectors=[[...], ...]
+    metadatas=[{"title": "Updated Doc 1"}, {"title": "Updated Doc 2"}]
+)
+
+# Batch insert (alternative API)
 collection.insert_batch(
     ids=["doc1", "doc2", "doc3"],
-    vectors=[[...], [...], [...]],  # List of vectors
-    metadata=[
+    vectors=[[...], [...], [...]],
+    metadatas=[
         {"title": "Doc 1"},
         {"title": "Doc 2"},
         {"title": "Doc 3"}
@@ -934,11 +966,18 @@ collection.insert_multi(
 ```python
 from sochdb import SearchRequest
 
+# Query API
+results = collection.query(
+    query_embeddings=[[0.15, 0.25, ...]],  # or query_vectors
+    n_results=10,
+    where={"author": "Alice"}  # metadata filter
+)
+# Returns: {"ids": [[...]], "distances": [[...]], "metadatas": [[...]]}
+
 # Using SearchRequest (full control)
 request = SearchRequest(
     vector=[0.15, 0.25, ...],       # Query vector
     k=10,                           # Number of results
-    ef_search=100,                  # Search quality (overrides collection default)
     filter={"author": "Alice"},     # Metadata filter
     min_score=0.7,                  # Minimum similarity score
     include_vectors=False,          # Include vectors in results
@@ -953,7 +992,7 @@ results = collection.vector_search(
     filter={"author": "Alice"}
 )
 
-# Process results
+# Process results (SearchResults object)
 for result in results:
     print(f"ID: {result.id}")
     print(f"Score: {result.score:.4f}")  # Similarity score
@@ -1057,13 +1096,24 @@ config = CollectionConfig(
 )
 collection = ns.create_collection(config)
 
-# Insert with text content
-collection.insert(
-    id="article1",
-    vector=[...],
-    metadata={
+# Insert with text content (supports add() or insert())
+collection.add(
+    ids=["article1"],
+    embeddings=[[...]],
+    metadatas=[{
         "title": "Machine Learning Tutorial",
         "text": "This tutorial covers the basics of machine learning...",
+        "category": "tech"
+    }]
+)
+
+# Or use insert for single document
+collection.insert(
+    id="article2",
+    vector=[...],
+    metadata={
+        "title": "Deep Learning Basics",
+        "text": "Introduction to neural networks...",
         "category": "tech"
     }
 )
@@ -3085,7 +3135,21 @@ collection = ns.create_collection(CollectionConfig(
     content_field="text"
 ))
 
-# Index documents
+# Index documents in batch
+def index_documents_batch(documents: list, embed_fn):
+    """Batch index documents."""
+    ids = [doc["id"] for doc in documents]
+    texts = [doc["text"] for doc in documents]
+    embeddings = [embed_fn(text) for text in texts]
+    metadatas = [{"text": text, "indexed_at": "2024-01-15"} for text in texts]
+    
+    collection.add(
+        ids=ids,
+        embeddings=embeddings,
+        metadatas=metadatas
+    )
+
+# Or single document insert
 def index_document(doc_id: str, text: str, embed_fn):
     embedding = embed_fn(text)
     collection.insert(
@@ -3094,7 +3158,20 @@ def index_document(doc_id: str, text: str, embed_fn):
         metadata={"text": text, "indexed_at": "2024-01-15"}
     )
 
-# Retrieve relevant context
+# Retrieve relevant context using query API
+def retrieve_context_query(query: str, embed_fn, k: int = 5) -> list:
+    """Use query API for retrieval."""
+    query_embedding = embed_fn(query)
+    
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=k
+    )
+    
+    # Returns: {"ids": [[...]], "distances": [[...]], "metadatas": [[...]]}
+    return [meta["text"] for meta in results["metadatas"][0]]
+
+# Or use hybrid search
 def retrieve_context(query: str, embed_fn, k: int = 5) -> list:
     query_embedding = embed_fn(query)
     
