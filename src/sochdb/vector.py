@@ -103,9 +103,12 @@ def _find_library():
         # 5. Development builds
         os.path.join(pkg_dir, "..", "..", "..", "target", "release"),
         os.path.join(pkg_dir, "..", "..", "..", "target", "debug"),
-        # 6. System paths
+        # 6. System paths (no manual setup required)
         "/usr/local/lib",
         "/usr/lib",
+        "/opt/homebrew/lib",  # macOS Apple Silicon Homebrew
+        "/opt/local/lib",      # MacPorts
+        os.path.expanduser("~/.sochdb/lib"),  # User installation
     ]
     
     for path in search_paths:
@@ -136,7 +139,9 @@ class _FFI:
             if path is None:
                 raise ImportError(
                     "Could not find libsochdb_index. "
-                    "Set SOCHDB_LIB_PATH environment variable."
+                    "Install with: brew install sochdb (macOS) or pip install sochdb-client. "
+                    "Or download from https://github.com/sochdb/sochdb/releases. "
+                    "Alternatively, set SOCHDB_LIB_PATH environment variable."
                 )
             cls._lib = ctypes.CDLL(path)
             cls._setup_bindings()

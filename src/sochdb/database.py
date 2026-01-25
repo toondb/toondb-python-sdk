@@ -108,8 +108,14 @@ def _find_library() -> str:
         os.path.join(pkg_dir, "..", "..", "..", "target", "debug"),
     ])
     
-    # 7. System paths
-    search_paths.extend(["/usr/local/lib", "/usr/lib"])
+    # 7. System paths (no manual setup required)
+    search_paths.extend([
+        "/usr/local/lib",
+        "/usr/lib",
+        "/opt/homebrew/lib",  # macOS Apple Silicon Homebrew
+        "/opt/local/lib",      # MacPorts
+        os.path.expanduser("~/.sochdb/lib"),  # User installation
+    ])
     
     for path in search_paths:
         lib_path = os.path.join(path, lib_name)
@@ -118,8 +124,10 @@ def _find_library() -> str:
     
     raise DatabaseError(
         f"Could not find {lib_name}. "
-        f"Searched in: {', '.join(search_paths[:5])}... "
-        "Set SOCHDB_LIB_PATH environment variable or install sochdb-client with pip."
+        f"Searched in package paths, development builds, and system locations. "
+        f"Install with: brew install sochdb (macOS) or pip install sochdb-client. "
+        f"Or download from https://github.com/sochdb/sochdb/releases. "
+        f"Alternatively, set SOCHDB_LIB_PATH environment variable to library path."
     )
 
 
