@@ -1,5 +1,5 @@
 """
-SochDB Python SDK v0.4.5
+SochDB Python SDK v0.4.6
 
 Dual-mode architecture: Embedded (FFI) + Server (gRPC/IPC)
 
@@ -32,7 +32,7 @@ Example (Server Mode):
     client.put_kv("key", b"value")
 """
 
-__version__ = "0.4.5"
+__version__ = "0.4.6"
 
 # Embedded mode (FFI)
 from .database import Database, Transaction
