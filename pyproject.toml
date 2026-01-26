@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sochdb"
-version = "0.4.7"
+version = "0.4.8"
 description = "SochDB is an AI-native database with token-optimized output, O(|path|) lookups, built-in vector search, and durable transactions."
 readme = "README.md"
-license = {text = "Apache-2.0"}
+license = {text = "AGPL-3.0-or-later"}
 authors = [
-    {name = "Sushanth", email = "sushanth@sochdb.dev"}
+    {name = "Sushanth Reddy Vanagala", email = "sushanth@sochdb.dev"}
 ]
 maintainers = [
     {name = "Sushanth", email = "sushanth@sochdb.dev"}
@@ -18,7 +18,7 @@ keywords = ["database", "llm", "ai", "vector-search", "embedded", "key-value", "
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",

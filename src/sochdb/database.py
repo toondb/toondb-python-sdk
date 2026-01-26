@@ -224,6 +224,21 @@ class _FFI:
         lib.sochdb_open_with_config.argtypes = [ctypes.c_char_p, C_DatabaseConfig]
         lib.sochdb_open_with_config.restype = ctypes.c_void_p
         
+        # sochdb_open_concurrent(path: *const c_char) -> *mut DatabasePtr
+        # Concurrent mode: multi-reader, single-writer for web apps
+        try:
+            lib.sochdb_open_concurrent.argtypes = [ctypes.c_char_p]
+            lib.sochdb_open_concurrent.restype = ctypes.c_void_p
+        except (AttributeError, OSError):
+            pass  # Not available in older library versions
+        
+        # sochdb_is_concurrent(ptr: *mut DatabasePtr) -> c_int
+        try:
+            lib.sochdb_is_concurrent.argtypes = [ctypes.c_void_p]
+            lib.sochdb_is_concurrent.restype = ctypes.c_int
+        except (AttributeError, OSError):
+            pass
+        
         # sochdb_close(ptr: *mut DatabasePtr)
         lib.sochdb_close.argtypes = [ctypes.c_void_p]
         lib.sochdb_close.restype = None
@@ -909,27 +924,124 @@ class Database:
     Provides direct access to a SochDB database file.
     This is the recommended mode for single-process applications.
     
+    For web applications or multi-process scenarios, use ``Database.open_concurrent()``
+    instead, which allows multiple processes to access the database simultaneously.
+    
     Example:
+        # Standard mode (single process)
         db = Database.open("./my_database")
         db.put(b"key", b"value")
         value = db.get(b"key")
         db.close()
+        
+        # Concurrent mode (multiple processes, e.g., Flask/FastAPI)
+        db = Database.open_concurrent("./my_database")
+        # Multiple workers can now access the database
     
     Or with context manager:
         with Database.open("./my_database") as db:
             db.put(b"key", b"value")
     """
     
-    def __init__(self, path: str, _handle):
+    def __init__(self, path: str, _handle, _is_concurrent: bool = False):
         """
         Initialize a database connection.
         
-        Use Database.open() to create instances.
+        Use Database.open() or Database.open_concurrent() to create instances.
         """
         self._path = path
         self._handle = _handle
         self._closed = False
         self._lib = _FFI.get_lib()
+        self._is_concurrent = _is_concurrent
+    
+    @property
+    def is_concurrent(self) -> bool:
+        """
+        Check if database is in concurrent mode.
+        
+        Concurrent mode allows multiple processes to access the database
+        simultaneously with lock-free reads and single-writer coordination.
+        
+        Returns:
+            True if database is in concurrent mode.
+        """
+        return self._is_concurrent
+    
+    @classmethod
+    def open_concurrent(cls, path: str) -> "Database":
+        """
+        Open database in concurrent mode (multi-reader, single-writer).
+        
+        This mode allows multiple processes to access the database simultaneously:
+        
+        - **Readers**: Lock-free, concurrent access via MVCC snapshots (~100ns latency)
+        - **Writers**: Single-writer coordination through atomic locks (~60µs amortized)
+        
+        Use this for:
+        
+        - Web applications (Flask, FastAPI, Django, Gunicorn, uWSGI)
+        - Hot reloading development servers
+        - Multi-process worker pools (multiprocessing, Celery)
+        - Any scenario with concurrent read access
+        
+        Args:
+            path: Path to the database directory.
+            
+        Returns:
+            Database instance in concurrent mode.
+            
+        Example:
+            # Flask application with multiple workers
+            from flask import Flask
+            from sochdb import Database
+            
+            app = Flask(__name__)
+            db = Database.open_concurrent("./app_data")
+            
+            @app.route("/user/<user_id>")
+            def get_user(user_id):
+                # Multiple requests can read simultaneously
+                data = db.get(f"user:{user_id}".encode())
+                return data or "Not found"
+            
+            @app.route("/user/<user_id>", methods=["POST"])
+            def update_user(user_id):
+                # Writes are serialized automatically
+                db.put(f"user:{user_id}".encode(), request.data)
+                return "OK"
+        
+        Performance:
+            - Read latency: ~100ns (lock-free atomic operations)
+            - Write latency: ~60µs amortized (with group commit)
+            - Concurrent readers: Up to 1024 per database
+        """
+        lib = _FFI.get_lib()
+        path_bytes = path.encode("utf-8")
+        
+        # Check if sochdb_open_concurrent is available
+        if not hasattr(lib, 'sochdb_open_concurrent'):
+            raise DatabaseError(
+                "Concurrent mode requires a newer version of the native library. "
+                "Please update sochdb to the latest version."
+            )
+        
+        handle = lib.sochdb_open_concurrent(path_bytes)
+        
+        if not handle:
+            raise DatabaseError(
+                f"Failed to open database at {path} in concurrent mode. "
+                "Check if the path exists and is accessible."
+            )
+        
+        # Track database open event
+        try:
+            from .analytics import track_database_open
+            track_database_open(path, mode="embedded-concurrent")
+        except Exception:
+            pass
+            
+        return cls(path, handle, _is_concurrent=True)
     
     @classmethod
     def open(cls, path: str, config: Optional[dict] = None) -> "Database":

@@ -38,12 +38,72 @@ Choose the deployment mode that fits your needs.
 - ✅ Edge deployments without network
 - ✅ No server setup required
 
+**Embedded Concurrent Mode (NEW in v0.4.8):**
+- ✅ Web applications (Flask, FastAPI, Django)
+- ✅ Multi-process workers (Gunicorn, uWSGI)
+- ✅ Hot reloading development servers
+- ✅ Multi-reader, single-writer architecture
+- ✅ Lock-free reads (~100ns latency)
+
 **Server Mode (gRPC):**
 - ✅ Production deployments
 - ✅ Multi-language teams (Python, Node.js, Go)
 - ✅ Distributed systems
 - ✅ Centralized business logic
 - ✅ Horizontal scaling
+
+---
+
+## Concurrent Embedded Mode (v0.4.8+)
+
+For web applications that need multiple processes to access the same database:
+
+```python
+from sochdb import Database
+
+# Open in concurrent mode - multiple processes can access simultaneously
+db = Database.open_concurrent("./app_data")
+
+# Reads are lock-free and can run in parallel (~100ns)
+value = db.get(b"user:123")
+
+# Writes are automatically coordinated (~60µs amortized)
+db.put(b"user:123", b'{"name": "Alice"}')
+
+# Check if concurrent mode is active
+print(f"Concurrent mode: {db.is_concurrent}")  # True
+```
+
+### Flask Example
+
+```python
+from flask import Flask
+from sochdb import Database
+
+app = Flask(__name__)
+db = Database.open_concurrent("./flask_db")
+
+@app.route("/user/<user_id>")
+def get_user(user_id):
+    # Multiple concurrent requests can read simultaneously
+    data = db.get(f"user:{user_id}".encode())
+    return data or "Not found"
+
+@app.route("/user/<user_id>", methods=["POST"])
+def update_user(user_id):
+    # Writes are serialized automatically
+    db.put(f"user:{user_id}".encode(), request.data)
+    return "OK"
+```
+
+### Performance
+
+| Operation | Standard Mode | Concurrent Mode |
+|-----------|---------------|-----------------|
+| Read (single process) | ~100ns | ~100ns |
+| Read (multi-process) | **Blocked** ❌ | ~100ns ✅ |
+| Write | ~5ms (fsync) | ~60µs (amortized) |
+| Max concurrent readers | 1 | 1024 |
 
 ---
 
